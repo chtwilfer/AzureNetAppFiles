@@ -1,11 +1,11 @@
-# AzureNetAppFiles
+# Azure NetAppFiles
 
 Create Azure NetApp Files (ANF) in Azure.
 Declare your variables accordingly.
 Log in to your public Azure Subscription.
-Make sure that your subscription is ready fro ANF (https://docs.microsoft.com/en-us/azure/azure-netapp-files/azure-netapp-files-register)
-Install Azure Modules - if nessecary
-Paramter prompt - fill in | more Parameters to check and change
+Make sure that your subscription is ready fro ANF (https://docs.microsoft.com/en-us/azure/azure-netapp-files/azure-netapp-files-register).
+Install Azure Modules - if nessecary.
+Paramter prompt - fill in | more Parameters to check and change.
         		
 ## Creation Date: 29.05.2020
         Purpose / Changes:
