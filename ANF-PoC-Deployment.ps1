@@ -12,7 +12,7 @@
         		
 	
 	.NOTES
-	Version:	1.4
+	Version:	1.6
 	Author: 	Orange Networks GmbH	- Christian Twilfer (c.twilfer@orangenet.de)
 	
 	Creation Date: 29.05.2020
@@ -27,7 +27,9 @@
                 14.09.2020 - Parameter changes
                 15.09.2020 - Second Location with Parameters etc. 
                 15.09.2020 - Start-Sleep for Oneclick-Deployment
-                15.09.2020 - Add Snapshot for Volumes in Region 1 & 2       
+                15.09.2020 - Add Snapshot for Volumes in Region 1
+                16.09.2020 - Add Cross-Region Replication
+                17.09.2020 - Add Snapshot for Volumes in Region 2                     
 
 		
 	.PARAMETER
@@ -36,7 +38,7 @@
         $anfAccountName                 = ANF Account Name
         $anfDelegation                  = Creates an new Delegation
         $poolSizeBytes                  = 4398046511104 -> 4TiB - firmly defined
-        $volumeSizeBytes                = 104857600 -> firmly defined
+        $volumeSizeBytes                = 104857600 -> 100GiB - firmly defined
         $volumeName                     = Please note that creation token needs to be unique within subscription and region
         
         $Secondlocation                 = Second Azure Location
@@ -44,7 +46,7 @@
         $SecondanfAccountName           = ANF Account Name in the second location
         $SecondanfDelegation            = Creates an new Delegation in the second location
         $SecondpoolSizeBytes            = 4398046511104 -> 4TiB - firmly defined in the second location
-        $SecondvolumeSizeBytes          = 104857600 -> firmly defined in the second location
+        $SecondvolumeSizeBytes          = 104857600 -> 100GiB - firmly defined in the second location
         $SecondvolumeName               = Please note that creation token needs to be unique within subscription and the second region
         
         
@@ -111,7 +113,7 @@ param(
 #endregion
 
 
-#more Parameters for deployment
+#more Parameters for Deployment
 $poolName = ($anfAccountName + "-pool")
 $VirtualNetworkName = ($anfAccountName+"-vnet")
 $VirtualSubnetName = ($anfAccountName+"-subnet")
@@ -130,7 +132,7 @@ $SecondProtocol = "NFSv3"
 read-host "Press ENTER to continue..."
 
 #region - Install Module
-    #Install or Update Azure NetApp & Azure Modules - if neccessary
+     # Install or Update Azure NetApp & Azure Modules - if neccessary
         if ($PSVersionTable.PSEdition -eq 'Desktop' -and (Get-Module -Name AzureRM -ListAvailable)) {
                 Write-Warning -Message ('Az module not installed. Having both the AzureRM and ' +
                 'Az modules installed at the same time is not supported.')
@@ -143,7 +145,7 @@ read-host "Press ENTER to continue..."
 read-host "Press ENTER to continue..."
       
 #region - Login to Azure, Subscription and register Provider
-     #Login to Azure and selct your subscription where you want to deploy ANF
+        #Login to Azure and selct your subscription where you want to deploy ANF
         Connect-AzAccount
 
         #Subscription
@@ -172,11 +174,11 @@ read-host "Press ENTER to continue..."
 
 #Region Create ANF Ressources
     #First Location
-     #Create a Resource Group
+        #Create a Resource Group
         New-AzResourceGroup -Name $resourceGroup -Location $location
 
-     #NetApp Account creation
-     # reate an NetApp Account
+        #NetApp Account creation
+        # reate an NetApp Account
         Write-Host "Creating new ANF Account $($anfAccountName)." 
         New-AzNetAppFilesAccount -ResourceGroupName $resourceGroup -Location $location -Name $anfAccountName
 
@@ -184,120 +186,77 @@ read-host "Press ENTER to continue..."
         #Create a capacity pool
         $poolSizeBytes = 4398046511104 # 4TiB - firmly defined
         Write-Host "Creating new ANF capacity pool $($PoolName) with a size of $($PoolSize) TiB. Service level: $($ServiceLevel)."
-        New-AzNetAppFilesPool -ResourceGroupName $resourceGroup `
-              -Location $location `
-              -AccountName $anfAccountName `
-              -Name $poolName `
-              -PoolSize $poolSizeBytes `
-              -ServiceLevel $serviceLevel
+        New-AzNetAppFilesPool -ResourceGroupName $resourceGroup -Location $location -AccountName $anfAccountName -Name $poolName -PoolSize $poolSizeBytes -ServiceLevel $serviceLevel
 
-     #Create volume (NFSv3) with VNet & Subnet (include subnet delegation)
+        #Volume - line by line
+        #Create volume (NFSv3) with VNet & Subnet (include subnet delegation)
         $anfDelegation = New-AzDelegation -Name ([guid]::NewGuid().Guid) -ServiceName "Microsoft.NetApp/volumes"
         Start-Sleep -s 10
-        $vnet = New-AzVirtualNetwork -Name $VirtualNetworkName `
-              -ResourceGroupName $resourceGroup `
-              -Location $location `
-              -AddressPrefix $NetworkAddressPrefix `
-              -Subnet $subnet
+        $vnet = New-AzVirtualNetwork -Name $VirtualNetworkName -ResourceGroupName $resourceGroup -Location $location -AddressPrefix $NetworkAddressPrefix -Subnet $subnet
         Start-Sleep -s 10
-        $subnet = New-AzVirtualNetworkSubnetConfig -Name $VirtualSubnetName `
-              -AddressPrefix $SubnetAddressPrefix `
-              -Delegation $anfDelegation
+        $subnet = New-AzVirtualNetworkSubnetConfig -Name $VirtualSubnetName -AddressPrefix $SubnetAddressPrefix -Delegation $anfDelegation
         Start-Sleep -s 10
         $subnetId = $vnet.Subnets[0].Id
         Start-Sleep -s 10
-        $volumeSizeBytes = 104857600 # 100GiB - firmly defined
-        New-AzNetAppFilesVolume -ResourceGroupName $resourceGroup `
-              -Location $location `
-              -AccountName $anfAccountName `
-              -PoolName $poolName `
-              -UsageThreshold $volumeSizeBytes `
-              -SubnetId $subnetId `
-              -CreationToken $CreationToken `
-              -ServiceLevel $serviceLevel `
-              -Name $volumeName `
-              -ProtocolType $Protocol 
+        $volumeSizeBytes = 107374182400 # 100GiB - firmly defined
+        New-AzNetAppFilesVolume -ResourceGroupName $resourceGroup -Location $location -AccountName $anfAccountName -PoolName $poolName -UsageThreshold $volumeSizeBytes -SubnetId $subnetId -CreationToken $CreationToken -ServiceLevel $serviceLevel -Name $volumeName -ProtocolType $Protocol 
 #endregion
 
 #Region Create ANF Ressources
     #Second Location
-     #Create a Resource Group
+        #Create a Resource Group
         New-AzResourceGroup -Name $SecondresourceGroup -Location $Secondlocation
 
-     #NetApp Account creation
-     # reate an NetApp Account
+        #NetApp Account creation
+        # reate an NetApp Account
         Write-Host "Creating new ANF Account $($SecondanfAccountName)." 
-        New-AzNetAppFilesAccount -ResourceGroupName $SecondresourceGroup `
-              -Location $Secondlocation `
-              -Name $SecondanfAccountName
+        New-AzNetAppFilesAccount -ResourceGroupName $SecondresourceGroup -Location $Secondlocation -Name $SecondanfAccountName
 
-     #Capacity pool
-     #Create a capacity pool
+        #Capacity pool
+        #Create a capacity pool
         $SecondpoolSizeBytes = 4398046511104 # 4TiB - firmly defined
         Write-Host "Creating new ANF capacity pool $($SecondPoolName) with a size of $($SecondPoolSizeBytes) Bytes. Service level: $($SecondServiceLevel)."
-        New-AzNetAppFilesPool -ResourceGroupName $SecondresourceGroup `
-              -Location $Secondlocation `
-              -AccountName $SecondanfAccountName `
-              -Name $SecondpoolName `
-              -PoolSize $SecondpoolSizeBytes `
-              -ServiceLevel $SecondserviceLevel
+        New-AzNetAppFilesPool -ResourceGroupName $SecondresourceGroup -Location $Secondlocation -AccountName $SecondanfAccountName -Name $SecondpoolName -PoolSize $SecondpoolSizeBytes -ServiceLevel $SecondserviceLevel
 
-    #Create volume (NFSv3) with VNet & Subnet (include subnet delegation)
+        #Volume - line by line
+        #Create volume (NFSv3) with VNet & Subnet (include subnet delegation)
         $SecondanfDelegation = New-AzDelegation -Name ([guid]::NewGuid().Guid) -ServiceName "Microsoft.NetApp/volumes"
         Start-Sleep -s 10
-        $Secondvnet = New-AzVirtualNetwork -Name $SecondVirtualNetworkName `
-              -ResourceGroupName $SecondresourceGroup `
-              -Location $Secondlocation `
-              -AddressPrefix $SecondNetworkAddressPrefix `
-              -Subnet $Secondsubnet
+        $Secondvnet = New-AzVirtualNetwork -Name $SecondVirtualNetworkName -ResourceGroupName $SecondresourceGroup -Location $Secondlocation -AddressPrefix $SecondNetworkAddressPrefix -Subnet $Secondsubnet
         Start-Sleep -s 10
-        $Secondsubnet = New-AzVirtualNetworkSubnetConfig -Name $SecondVirtualSubnetName `
-              -AddressPrefix $SecondSubnetAddressPrefix `
-              -Delegation $SecondanfDelegation
+        $Secondsubnet = New-AzVirtualNetworkSubnetConfig -Name $SecondVirtualSubnetName -AddressPrefix $SecondSubnetAddressPrefix -Delegation $SecondanfDelegation
         Start-Sleep -s 10
         $SecondsubnetId = $Secondvnet.Subnets[0].Id
         Start-Sleep -s 10
-        $SecondvolumeSizeBytes = 104857600 # 100GiB - firmly defined
-        New-AzNetAppFilesVolume -ResourceGroupName $SecondresourceGroup `
-              -Location $Secondlocation `
-              -AccountName $SecondanfAccountName `
-              -PoolName $SecondpoolName `
-              -UsageThreshold $SecondvolumeSizeBytes `
-              -SubnetId $SecondsubnetId `
-              -CreationToken $SecondCreationToken `
-              -ServiceLevel $SecondserviceLevel `
-              -Name $SecondvolumeName `
-              -ProtocolType $SecondProtocol
+        $SecondvolumeSizeBytes = 107374182400 # 100GiB - firmly defined
+        New-AzNetAppFilesVolume -ResourceGroupName $SecondresourceGroup -Location $Secondlocation -AccountName $SecondanfAccountName -PoolName $SecondpoolName -UsageThreshold $SecondvolumeSizeBytes -SubnetId $SecondsubnetId -CreationToken $SecondCreationToken -ServiceLevel $SecondserviceLevel -Name $SecondvolumeName -ProtocolType $SecondProtocol
         Start-Sleep -s 240
 #endregion
 
 #region Snapshot
-     #Get FilSystemID from Volume
-        Get-AzNetAppFilesVolume
-        $FileSystemID = "PUTINYOURFILESYSTEMIDFROMOUTPUT"
+        #Get FilSystemID from Volume
+        $FileSystemID = Get-AzNetAppFilesVolume -ResourceGroupName $ResourceGroup -AccountName $anfAccountName -PoolName $poolName -VolumeName $volumeName
         
-     # Create a new snapshot from specified volume Region 1
-        New-AzNetAppFilesSnapshot -ResourceGroupName $ResourceGroup `
-              -l $location `
-              -AccountName $anfAccountName `
-              -PoolName $poolname `
-              -VolumeName $volumename `
-              -SnapshotName "MyAnfSnapshot" `
-              -FileSystemId $FileSystemID
+        # Create a new snapshot from specified volume Region 1
+        New-AzNetAppFilesSnapshot -ResourceGroupName $ResourceGroup -l $location -AccountName $anfAccountName -PoolName $poolname -VolumeName $volumename -SnapshotName "MyAnfSnapshot" -FileSystemId $FileSystemID.FileSystemID
 
-     # Create a new snapshot from specified volume Region 2
-        New-AzNetAppFilesSnapshot -ResourceGroupName $ResourceGroup `
-              -l $location `
-              -AccountName $anfAccountName `
-              -PoolName $poolname `
-              -VolumeName $volumename `
-              -SnapshotName "MyAnfSnapshot" `
-              -FileSystemId $FileSystemID
+        #Get FilSystemID from Volume second location
+        $FileSystemID = Get-AzNetAppFilesVolume -ResourceGroupName $secondResourceGroup -AccountName $secondanfAccountName -PoolName $secondpoolName -VolumeName $secondvolumeName
+
+        #Create a new snapshot from specified volume Region 2
+        New-AzNetAppFilesSnapshot -ResourceGroupName $secondResourceGroup -l $secondlocation -AccountName $secondanfAccountName -PoolName $secondpoolname -VolumeName $secondvolumename -SnapshotName "MyAnfSnapshot" -FileSystemId $FileSystemID.FileSystemID
 #endregion
 
+#region cross-region replication from region 1 to region 2
+        #Create / Approve cross-region replication from a volume
+#        $Volume = Get-AzNetAppFilesVolume -ResourceGroupName $ResourceGroup -AccountName $anfAccountName -PoolName $poolName -VolumeName $volumeName
+        
+        #Approve cross-region replication from vloume 1 in region 1 to region 2
+#        Approve-AzNetAppFilesReplication -ResourceGroupName $Resourcegroup -AccountName $anfAccountName -PoolName $poolName -VolumeName $volumeName -DataProtectionVolumeId $Volume.ID
+#endregion
 
 #region - Cleanup ressources
-    #Delete ResourceGroup with all ressources in there
+        #Delete ResourceGroup with all ressources in there
 #        Remove-AzResourceGroup -Name $ResourceGroup
 #        Remove-AzResourceGroup -Name $SecondResourceGroup
 #endregion
