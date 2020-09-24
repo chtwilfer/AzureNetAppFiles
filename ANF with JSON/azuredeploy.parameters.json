@@ -1,0 +1,39 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "netappAccountName": {
+            "value": "anfwe"
+        },
+        "netappPoolName": {
+            "value": "anfwe-pool"
+        },
+        "netappPoolSize": {
+            "value": 4398046511104 
+        },
+        "netappVolumeServicelevel": {
+            "value": "Standard"
+        },        
+        "netappVolumeName": {
+            "value": "anfwe-volume"
+        },
+        "netappVolumeSize": {
+            "value": 107374182400
+        },
+        "netappVolumeProtocol": {
+            "value": "NFSv3"
+        },        
+        "netappVolumeVirtualNetworkName": {
+            "value": "anfwe-vnet"
+        },
+        "netappVolumeVirtualNetworkSubnetName": {
+            "value": "anfwe-subnet"
+        },
+        "netappVirtualNetworkAddressPrefix": {
+            "value": "10.3.0.0/16"
+        },
+        "netappVirtualNetworkSubnetAddressPrefix": {
+            "value": "10.3.2.0/24"
+        }             
+    }
+}
