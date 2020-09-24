@@ -192,9 +192,9 @@ read-host "Press ENTER to continue..."
         #Create volume (NFSv3) with VNet & Subnet (include subnet delegation)
         $anfDelegation = New-AzDelegation -Name ([guid]::NewGuid().Guid) -ServiceName "Microsoft.NetApp/volumes"
         Start-Sleep -s 10
-        $vnet = New-AzVirtualNetwork -Name $VirtualNetworkName -ResourceGroupName $resourceGroup -Location $location -AddressPrefix $NetworkAddressPrefix -Subnet $subnet
-        Start-Sleep -s 10
         $subnet = New-AzVirtualNetworkSubnetConfig -Name $VirtualSubnetName -AddressPrefix $SubnetAddressPrefix -Delegation $anfDelegation
+	Start-Sleep -s 10
+	$vnet = New-AzVirtualNetwork -Name $VirtualNetworkName -ResourceGroupName $resourceGroup -Location $location -AddressPrefix $NetworkAddressPrefix -Subnet $subnet
         Start-Sleep -s 10
         $subnetId = $vnet.Subnets[0].Id
         Start-Sleep -s 10
