@@ -1,5 +1,7 @@
 # Azure NetApp Files Deployment with JSON Template
 
+This template deploys ANF in your defined region, with one ANF account, one pool and one volume. The volume protocol ist NFS.
+
 ## First step:
 Start by editing azure.parameters.json and define your parameters.
 
