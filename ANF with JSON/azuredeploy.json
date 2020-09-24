@@ -1,0 +1,183 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "location": {
+            "type": "string",
+            "defaultValue": "[resourceGroup().location]",
+            "metadata": {
+                "description": "Specifies the location"
+            }
+        },
+        "netappAccountName": {
+            "type": "string",
+            "metadata": {
+                "description": "Specifies Account Name"
+            }
+        },
+        "netappPoolName": {
+            "type": "string",
+            "metadata": {
+                "description": "Specifies Pool Name"
+            }
+        },
+        "netappPoolSize": {
+            "type": "int",
+            "metadata": {
+                "description": "Specifies Pool Size"
+            }
+        },
+        "netappVolumeName": {
+            "type": "string",
+            "metadata": {
+                "description": "Specifies Volume Name"
+            }
+        },
+        "netappVolumeSize": {
+            "type": "int",
+            "metadata": {
+                "description": "Specifies Volume Size"
+            }
+        },
+        "netappVolumeServicelevel": {
+            "type": "string",
+            "allowedValues": [
+                "Standard",
+                "Premium",
+                "Ultra"
+            ],
+            "defaultValue": "Standard",
+            "metadata": {
+                "description": "Specifies Volume Service Level"
+            }
+        },
+        "netappVolumeProtocol": {
+            "type": "string",
+            "metadata": {
+                "description": "Specifies Volume Protocol"
+            }
+        },
+        "netappVolumeVirtualNetworkName": {
+            "type": "string",
+            "defaultValue": "",
+            "metadata": {
+                "description": "Specifies Virtual NetWork Name"
+            }
+        },
+        "netappVolumeVirtualNetworkSubnetName": {
+            "type": "string",
+            "defaultValue": "",
+            "metadata": {
+                "description": "Specifies Virtual Subnet Name"
+            }
+        },
+        "netappVirtualNetworkAddressPrefix": {
+            "type": "string",
+            "defaultValue": "10.3.0.0/16",
+            "metadata": {
+                "description": "Specifies Virtual Network Address Prefix"
+            }
+        },
+        "netappVirtualNetworkSubnetAddressPrefix": {
+            "type": "string",
+            "defaultValue": "10.3.2.0/24",
+            "metadata": {
+                "description": "Specifies Virtual Network Address Prefix"
+            }
+        }
+    },
+    "variables": {
+    },
+    "resources": [
+        {
+            "type": "Microsoft.NetApp/netAppAccounts",
+            "apiVersion": "2020-06-01",
+            "name": "[parameters('netappAccountName')]",
+            "location": "[parameters('location')]",
+            "properties": {}
+        },
+        {
+            "type": "Microsoft.Network/virtualNetworks",
+            "apiVersion": "2020-05-01",
+            "name": "[parameters('netappVolumeVirtualNetworkName')]",
+            "location": "[parameters('location')]",
+            "properties": {
+                "addressSpace": {
+                    "addressPrefixes": [
+                        "[parameters('netappVirtualNetworkAddressPrefix')]"
+                    ]
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Network/virtualNetworks/subnets",
+            "apiVersion": "2020-05-01",
+            "name": "[concat(parameters('netappVolumeVirtualNetworkName'), '/', parameters('netappVolumeVirtualNetworkSubnetName'))]",
+            "dependsOn": [
+                "[parameters('netappVolumeVirtualNetworkName')]"
+            ],
+            "properties": {
+                "addressPrefix": "[parameters('netappVirtualNetworkSubnetAddressPrefix')]",
+                "delegations": [
+                    {
+                        "name": "string",
+                        "properties": {
+                            "serviceName": "Microsoft.NetApp/volumes"
+                        }
+                    }
+                ],
+                "privateEndpointNetworkPolicies": "Enabled",
+                "privateLinkServiceNetworkPolicies": "Enabled"
+            }
+        },
+        {
+            "type": "Microsoft.NetApp/netAppAccounts/capacityPools",
+            "apiVersion": "2020-06-01",
+            "name": "[concat(parameters('netappAccountName'), '/', parameters('netappAccountName'), '-pool')]",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.NetApp/netAppAccounts', parameters('netappAccountName'))]"
+            ],
+            "properties": {
+                "serviceLevel": "Standard",
+                "size": "[parameters('netappPoolSize')]"
+            }
+        },
+        {
+            "name": "[concat(parameters('netappAccountName'),'/', parameters('netappPoolName'), '/',parameters('netappVolumeName'))]",
+            "apiVersion": "2020-06-01",
+            "type": "Microsoft.NetApp/netAppAccounts/capacityPools/volumes",
+            "location": "[parameters('location')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.NetApp/netAppAccounts/capacityPools', parameters('netappAccountName'), parameters('netappPoolName'))]",
+                "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('netappVolumeVirtualNetworkName'), parameters('netappVolumeVirtualNetworkSubnetName'))]"
+            ],
+            "properties": {
+                "serviceLevel": "[parameters('netappVolumeServicelevel')]",
+                "usageThreshold": "[parameters('netappVolumeSize')]",
+                "creationToken": "[parameters('netappVolumeName')]",
+                "subnetId": "[resourceId('Microsoft.Network/virtualNetworks/subnets', parameters('netappVolumeVirtualNetworkName'), parameters('netappVolumeVirtualNetworkSubnetName'))]",
+                "protocolTypes": [ "[parameters('netappVolumeProtocol')]" ],
+                "exportPolicy": {
+                    "rules": [
+                        {
+                            "allowedClients": "0.0.0.0/0",
+                            "nfsv3": true,
+                            "nfsv41": false,
+                            "ruleIndex": 1,
+                            "unixReadOnly": false,
+                            "unixReadWrite": true,
+                            "kerberos5ReadOnly": false,
+                            "kerberos5ReadWrite": false,
+                            "kerberos5iReadOnly": false,
+                            "kerberos5iReadWrite": false,
+                            "kerberos5pReadOnly": false,
+                            "kerberos5pReadWrite": false,
+                            "hasRootAccess": true
+                        }
+                    ]
+                }
+            }
+        }
+    ]
+}
