@@ -202,7 +202,7 @@ read-host "Press ENTER to continue for Deployment ANF Resources..."
         # Create a virtual machine configuration
         $vmConfig = New-AzVMConfig -VMName $vmName -VMSize Standard_D2_v3 | `
                 Set-AzVMOperatingSystem -Windows -ComputerName $vmName -Credential $cred | `
-                Set-AzVMSourceImage -PublisherName MicrosoftWindowsServer -Offer WindowsServer -Skus 2016-Datacenter -Version latest | `
+                Set-AzVMSourceImage -PublisherName oracle -Offer oracle-database-19-3 -Skus oracle-database-19-0904 -Version latest | `
                 Add-AzVMNetworkInterface -Id $nic3.Id
 
         # Create a virtual machine
