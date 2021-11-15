@@ -11,7 +11,7 @@
 	
 	.NOTES
 	Version:	1.0
-	Author: 	Orange Networks GmbH	- Christian Twilfer (c.twilfer@orangenet.de)
+	Author: 	Christian Twilfer (christian.twilfer@outlook.de)
 	
 	Creation Date: 22.09.2020
         Purpose / Changes:
