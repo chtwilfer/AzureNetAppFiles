@@ -1,87 +1,84 @@
+#requires -Version 7.4
 <#
-	.SYNOPSIS
-	Create Azure NetApp Files (ANF) in Azure with JSON
-
-	.DESCRIPTION
-		Declare your variables accordingly.
-		Log in to your public Azure Subscription.
-        Make sure that your subscription is ready fro ANF (https://docs.microsoft.com/en-us/azure/azure-netapp-files/azure-netapp-files-register)
-        Install Azure Modules - if nessecary
-        		
-	
-	.NOTES
-	Version:	1.0
-	Author: 	Christian Twilfer (christian.twilfer@outlook.de)
-	
-	Creation Date: 22.09.2020
-        Purpose / Changes:
-               
-		
-	.PARAMETER
-        $location                       = First Azure Location
-        $resourceGroup                  = the name of the Resource Group
-
-             
+.SYNOPSIS
+Validates and deploys the Azure NetApp Files ARM template.
+.DESCRIPTION
+WhatIf provides an offline operation summary. Preview requests an Azure ARM
+What-If against an existing resource group without creating or registering anything.
 #>
-
-Set-ExecutionPolicy unrestricted -force
-Start-Sleep -Seconds 5
-
-#region put in Parameters
+[CmdletBinding(SupportsShouldProcess)]
 param(
- [Parameter(Mandatory=$True)] # Azure Region e.g. WestEurope, germanywestcentral
- [string] $location,
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Location,
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $ResourceGroup,
+    [Parameter(Mandatory)][guid] $SubscriptionId,
+    [string] $TemplateFile = "$PSScriptRoot/azuredeploy.json",
+    [string] $TemplateParameterFile = "$PSScriptRoot/azuredeploy.parameters.json",
+    [ValidateNotNullOrEmpty()][string] $DeploymentName = 'NetApp-Deployment',
+    [switch] $Preview,
+    [switch] $RegisterProviders,
+    [ValidateRange(1, 7200)][int] $TimeoutSeconds = 900
+)
 
- [Parameter(Mandatory=$True)] # Resource Group Name
- [string] $resourcegroup
- )
- #endregion
-
-read-host "Press ENTER to continue..."
-
-#region - Install Module
-        #Install and Import Azure NetApp & Azure Modules - if neccessary - this will take some time
-        Install-Module -Name Az -AllowClobber -Scope CurrentUser
-        # Install-Module -Name Az.NetAppFiles
-        # Install-Module -Name Az.Resources
-        # Install-Module -Name Az.Network
-
-        # Update Azure NetApp & Azure Modules - if neccessary
-        if ($PSVersionTable.PSEdition -eq 'Desktop' -and (Get-Module -Name AzureRM -ListAvailable)) {
-                Write-Warning -Message ('Az module not installed. Having both the AzureRM and ' +
-                'Az modules installed at the same time is not supported.')
-        } else {
-        Install-Module -Name Az -AllowClobber -Force
-        }
-#endregion
-
-read-host "Press ENTER to continue..."
-      
-#region - Login to Azure, Subscription and register Provider
-        #Login to Azure and selct your subscription where you want to deploy ANF
-        Connect-AzAccount
-
-        #Subscription
-        #List all Subscriptions in Azure and grab your SubscriptionID
-        Get-AzSubscription | Where-Object -Property State -eq "Enabled" | Out-Gridview -PassThru | Select-AzSubscription
-    
-        if ((Get-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFSnapshotPolicy).RegistrationState -ne "Registered") {
-            Register-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFSnapshotPolicy
-        }
-        if ((Get-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFTierChange).RegistrationState -ne "Registered") {
-            Register-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFTierChange
-        }
-
-        # Wait for registration to complete
-        while ((Get-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFSnapshotPolicy).RegistrationState -ne "Registered") {
-            Start-Sleep -Seconds 10
-        }
-        
-        while ((Get-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFTierChange).RegistrationState -ne "Registered") {
-            Start-Sleep -Seconds 10
+$ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/../scripts/Deployment.Common.ps1"
+$TemplateFile = (Resolve-Path -LiteralPath $TemplateFile -ErrorAction Stop).Path
+$TemplateParameterFile = (Resolve-Path -LiteralPath $TemplateParameterFile -ErrorAction Stop).Path
+$template = Get-Content -LiteralPath $TemplateFile -Raw | ConvertFrom-Json -AsHashtable
+$parameterDocument = Get-Content -LiteralPath $TemplateParameterFile -Raw | ConvertFrom-Json -AsHashtable
+$parameters = @{}
+foreach ($name in $parameterDocument.parameters.Keys) {
+    if (-not $template.parameters.ContainsKey($name)) {
+        throw "Unknown template parameter '$name'."
     }
-#endregion
+    if (-not $parameterDocument.parameters[$name].ContainsKey('value')) {
+        throw "Parameter '$name' must contain a value. Key Vault references are not supported by this wrapper."
+    }
+    $parameters[$name] = $parameterDocument.parameters[$name].value
+}
+# The script's explicit location always wins over a parameter-file location.
+$parameters.location = $Location
+foreach ($name in $template.parameters.Keys) {
+    if (-not $template.parameters[$name].ContainsKey('defaultValue') -and -not $parameters.ContainsKey($name)) {
+        throw "Missing required template parameter '$name'."
+    }
+    if (-not $parameters.ContainsKey($name)) {
+        $parameters[$name] = $template.parameters[$name].defaultValue
+    }
+}
+Assert-AnfNetwork -Network $parameters.netappVirtualNetworkAddressPrefix `
+    -Subnet $parameters.netappVirtualNetworkSubnetAddressPrefix -AllowedClients $parameters.netappAllowedClients
+Assert-AnfCapacity -PoolSizeBytes $parameters.netappPoolSize -VolumeSizeBytes $parameters.netappVolumeSize
 
-New-AzResourceGroup -Name $resourcegroup -Location $location
-Start-Sleep -Seconds 10
-New-AzResourceGroupDeployment -TemplateParameterFile C:\temp\azuredeploy.parameters.json -Templatefile C:\temp\azuredeploy.json -Name "NetApp-Deployment" -ResourceGroupName $resourcegroup -Mode Incremental
+if (-not $PSCmdlet.ShouldProcess("Subscription $SubscriptionId; $ResourceGroup/$Location",
+    "Validate ARM template and $(if ($Preview) { 'request read-only ARM What-If' } else { 'deploy incrementally' }); provider registration: $($RegisterProviders -and -not $Preview)")) {
+    return
+}
+Import-AnfModule -Name Az.Accounts, Az.Resources
+Initialize-AnfContext -SubscriptionId $SubscriptionId -RegisterProviders:($RegisterProviders -and -not $Preview) `
+    -TimeoutSeconds $TimeoutSeconds
+if ($Preview) {
+    $group = Get-AzResourceGroup -ErrorAction Stop | Where-Object ResourceGroupName -EQ $ResourceGroup
+    if (-not $group) {
+        throw 'ARM preview requires an existing resource group. No resource group was created.'
+    }
+} else {
+    Initialize-AnfResourceGroup -Name $ResourceGroup -Location $Location | Out-Null
+}
+
+$deployment = @{
+    ResourceGroupName = $ResourceGroup; TemplateFile = $TemplateFile
+    TemplateParameterObject = $parameters; ErrorAction = 'Stop'
+}
+$validationErrors = @(Test-AzResourceGroupDeployment @deployment)
+if ($validationErrors.Count -gt 0) {
+    throw "ARM validation failed: $($validationErrors | ConvertTo-Json -Depth 10 -Compress)"
+}
+if ($Preview) {
+    Get-AzResourceGroupDeploymentWhatIfResult @deployment
+} else {
+    $result = New-AzResourceGroupDeployment @deployment -Name $DeploymentName -Mode Incremental
+    if ($result.ProvisioningState -ne 'Succeeded') {
+        throw "ARM deployment ended in state '$($result.ProvisioningState)'."
+    }
+    $result
+}

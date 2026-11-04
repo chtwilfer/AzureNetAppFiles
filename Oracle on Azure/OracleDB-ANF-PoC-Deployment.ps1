@@ -1,243 +1,176 @@
+#requires -Version 7.4
 <#
-	.SYNOPSIS
-	Create Azure NetApp Files (ANF) in Azure w ith Oracle Databases
-
-	.DESCRIPTION
-	Log in to your public Azure Subscription.
-        Make sure that your subscription is ready fro ANF (https://docs.microsoft.com/en-us/azure/azure-netapp-files/azure-netapp-files-register)
-        Install Azure Modules - if nessecary
-        three paramter and Windows Credentials to fill in on start
-        more Variabels to check and change
-        there is a Bastion Host for the acceess in Azure
-        		
-	
-	.NOTES
-	Version:	1.0
-	Author: 	Christian Twilfer (christian.twilfer@outlook.de)
-	
-	Creation Date: 23.09.2020
-        Purpose / Changes:
-
-        
-	.PARAMETER
-        $location                       = First Azure Location
-        $resourceGroup                  = the name of the Resource Group
-        $anfAccountName                 = the name of the ANF Account
-             
+.SYNOPSIS
+Creates a Windows application VM, Linux Oracle VM and two ANF NFS volumes.
+.DESCRIPTION
+VMs use private IP addresses only. Provide private connectivity for RDP/SSH.
+No Bastion, Oracle database initialization or NFS mounts are configured.
+Marketplace terms must already be accepted; the script never accepts them.
 #>
-
-Set-ExecutionPolicy unrestricted -force
-
-#region put in Parameters
+[CmdletBinding(SupportsShouldProcess)]
 param(
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Location,
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $ResourceGroup,
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $AnfAccountName,
+    [Parameter(Mandatory)][guid] $SubscriptionId,
+    [Parameter(Mandatory)][pscredential] $Cred,
+    [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $SshPublicKey,
+    [ValidatePattern('^[a-z_][a-z0-9_-]{0,30}$')][string] $OracleAdminUsername = 'azureuser',
+    [string] $NetworkAddressPrefix = '10.6.0.0/16',
+    [string] $SubnetAddressPrefix = '10.6.2.0/24',
+    [string] $AppNetworkAddressPrefix = '10.5.0.0/16',
+    [string] $AppSubnetAddressPrefix = '10.5.2.0/24',
+    [string] $OracleNetworkAddressPrefix = '10.7.0.0/16',
+    [string] $OracleSubnetAddressPrefix = '10.7.2.0/24',
+    [ValidateRange(4, 1024)][int] $PoolSizeTiB = 4,
+    [ValidateRange(100, 1048576)][int] $VolumeSizeGiB = 100,
+    [ValidateSet('Standard', 'Premium', 'Ultra')][string] $ServiceLevel = 'Standard',
+    [ValidateNotNullOrEmpty()][string] $VmSize = 'Standard_D2_v3',
+    [ValidateNotNullOrEmpty()][string] $AppImageSku = '2022-datacenter',
+    [ValidateNotNullOrEmpty()][string] $OracleImagePublisher = 'oracle',
+    [ValidateNotNullOrEmpty()][string] $OracleImageOffer = 'oracle-database-19-3',
+    [ValidateNotNullOrEmpty()][string] $OracleImageSku = 'oracle-database-19-0904',
+    [ValidateNotNullOrEmpty()][string] $OracleImageVersion = 'latest',
+    [switch] $AllowRootAccess,
+    [switch] $RegisterProviders,
+    [ValidateRange(1, 7200)][int] $TimeoutSeconds = 900
+)
 
- [Parameter(Mandatory=$True)] # Azure Region e.g. WestEurope, germanywestcentral
- [string] $location,
-
- [Parameter(Mandatory=$True)] # Resource Group Name
- [string] $resourceGroup,
-
- [Parameter(Mandatory=$True)] # ANF Account Name
- [string] $anfAccountName,
-
- [System.Management.Automation.PSCredential] # Windows Credentials
- $Cred = $(Get-Credential)
- 
- )
-#endregion
-
-#region Change these Parameters for your Deployment 
-     #more Variables for ANF Deployment
-        $CreationToken = "standard"
-        $CreationToken2 = "standard2"
-        $poolName = ($anfAccountName + "-pool")
-        $VirtualNetworkName = ($anfAccountName+"-vnet")
-        $VirtualSubnetName = ($anfAccountName+"-subnet")
-        $NetworkAddressPrefix = "10.6.0.0/16"
-        $SubnetAddressPrefix = "10.6.2.0/24"
-        $volumeName1 = ($anfAccountName+"-volume-db")
-        $volumeName2 = ($anfAccountName+"-volume-logs")
-        $serviceLevel = "Standard"
-        $Protocol = "NFSv3"
- #endregion
-
-
-read-host "Press ENTER to continue..."
-
-#region - Install Module
-     # Install or Update Azure NetApp & Azure Modules - if neccessary
-        if ($PSVersionTable.PSEdition -eq 'Desktop' -and (Get-Module -Name AzureRM -ListAvailable)) {
-                Write-Warning -Message ('Az module not installed. Having both the AzureRM and ' +
-                'Az modules installed at the same time is not supported.')
-        } else {
-        Install-Module -Name Az -AllowClobber -Force
+$ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/../scripts/Deployment.Common.ps1"
+foreach ($network in @(
+    @($NetworkAddressPrefix, $SubnetAddressPrefix),
+    @($AppNetworkAddressPrefix, $AppSubnetAddressPrefix),
+    @($OracleNetworkAddressPrefix, $OracleSubnetAddressPrefix)
+)) {
+    Assert-AnfNetwork -Network $network[0] -Subnet $network[1] -AllowedClients @($OracleSubnetAddressPrefix)
+}
+$ranges = @($NetworkAddressPrefix, $AppNetworkAddressPrefix, $OracleNetworkAddressPrefix | ForEach-Object { ConvertTo-AnfNetwork $_ })
+for ($i = 0; $i -lt $ranges.Count; $i++) {
+    for ($j = $i + 1; $j -lt $ranges.Count; $j++) {
+        if ($ranges[$i].Start -le $ranges[$j].End -and $ranges[$j].Start -le $ranges[$i].End) {
+            throw 'The ANF, application and Oracle VNet address spaces must not overlap.'
         }
-        Import-Module -Name Az
-#endregion
-
-read-host "Press ENTER to continue..."
-      
-#region - Login to Azure, Subscription and register Provider
-        #Login to Azure and selct your subscription where you want to deploy ANF
-        Connect-AzAccount
-
-        #Subscription
-        #List all Subscriptions in Azure and grab your SubscriptionID
-        Write-Host "Connecting to Azure subscription."
-        Get-AzSubscription | Where-Object -Property State -eq "Enabled" | Out-Gridview -PassThru | Select-AzSubscription
-    
-        if ((Get-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFSnapshotPolicy).RegistrationState -ne "Registered") {
-            Register-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFSnapshotPolicy
-        }
-        if ((Get-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFTierChange).RegistrationState -ne "Registered") {
-            Register-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFTierChange
-        }
-
-        # Wait for registration to complete
-        while ((Get-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFSnapshotPolicy).RegistrationState -ne "Registered") {
-            Start-Sleep -Seconds 10
-        }
-        
-        while ((Get-AzProviderFeature -ProviderNamespace Microsoft.NetApp -FeatureName ANFTierChange).RegistrationState -ne "Registered") {
-            Start-Sleep -Seconds 10
     }
-#endregion
-        
-read-host "Press ENTER to continue for Deployment App VM ..."
+}
+Assert-AnfCapacity -PoolSizeBytes ($PoolSizeTiB * 1TB) -VolumeSizeBytes ($VolumeSizeGiB * 1GB) -VolumeCount 2
+if ($SshPublicKey -notmatch '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/]+={0,3}( .*)?$') {
+    throw 'SshPublicKey must contain a single OpenSSH public key, not a path or a private key.'
+}
+if (-not $PSCmdlet.ShouldProcess("Subscription $SubscriptionId; $ResourceGroup/$Location",
+    "Create private App-VM and Linux OracleDB-VM, peer three VNets, create/verify two NFSv3 volumes; root access: $AllowRootAccess; provider registration: $RegisterProviders")) {
+    return
+}
 
-#Region Create ResourceGroup, VNet 1 with 1 App VM
-     #Create a Resource Group
-        New-AzResourceGroup -Name $resourceGroup -Location $location
+Import-AnfModule -Name Az.Accounts, Az.Resources, Az.Network, Az.NetAppFiles, Az.Compute, Az.MarketplaceOrdering
+Initialize-AnfContext -SubscriptionId $SubscriptionId -ProviderNamespace Microsoft.NetApp, Microsoft.Network, Microsoft.Compute `
+    -RegisterProviders:$RegisterProviders -TimeoutSeconds $TimeoutSeconds
 
-     #Create App VM1 with VNet and Subnet
-        # Variables for common values
-        $vmName = "App-VM"
-        
-        Write-Output "Creating the Virtual Machine App 1"
-        # Create a subnet configuration
-        $subnetConfig = New-AzVirtualNetworkSubnetConfig -Name "App-subnet" -AddressPrefix 10.5.2.0/24
+# Fail before resource creation if an image or its licensing prerequisites are unavailable.
+$oracleImage = Get-AzVMImage -Location $Location -PublisherName $OracleImagePublisher -Offer $OracleImageOffer `
+    -Skus $OracleImageSku -Version $OracleImageVersion -ErrorAction Stop
+if (-not $oracleImage -or $oracleImage.OSDiskImage.OperatingSystem -ne 'Linux') {
+    throw 'The selected Oracle Marketplace image must exist in the region and use Linux.'
+}
+$appImage = Get-AzVMImage -Location $Location -PublisherName MicrosoftWindowsServer -Offer WindowsServer `
+    -Skus $AppImageSku -Version latest -ErrorAction Stop
+if (-not $appImage -or $appImage.OSDiskImage.OperatingSystem -ne 'Windows') {
+    throw 'The selected application image must exist in the region and use Windows.'
+}
+$plan = $oracleImage.PurchasePlan
+if ($plan) {
+    $terms = Get-AzMarketplaceTerms -Publisher $plan.Publisher -Product $plan.Product -Name $plan.Name -ErrorAction Stop
+    if (-not $terms.Accepted) {
+        throw "Accept the Marketplace terms for '$($plan.Publisher)/$($plan.Product)/$($plan.Name)' explicitly before deploying."
+    }
+}
 
-        # Create a virtual network
-        $vnet = New-AzVirtualNetwork -ResourceGroupName $resourceGroup -Location $location -Name "App-VNet" -AddressPrefix 10.5.0.0/16 -Subnet $subnetConfig
+Initialize-AnfResourceGroup -Name $ResourceGroup -Location $Location | Out-Null
+# Existing VMs/NICs/NSGs may have public access or unrelated settings. Never silently reuse them.
+foreach ($existing in @(
+    @(Get-AzVM -ResourceGroupName $ResourceGroup -ErrorAction Stop | Where-Object Name -In @('App-VM', 'OracleDB-VM')),
+    @(Get-AzNetworkInterface -ResourceGroupName $ResourceGroup -ErrorAction Stop | Where-Object Name -In @('AppVM-nic', 'OracleVM-nic')),
+    @(Get-AzNetworkSecurityGroup -ResourceGroupName $ResourceGroup -ErrorAction Stop | Where-Object Name -In @('AppVMNSG', 'OracleVMNSG'))
+)) {
+    if ($existing.Count -gt 0) {
+        throw 'Oracle VM resources already exist. Review or explicitly remove them before redeploying; no existing VM/network security configuration was changed.'
+    }
+}
 
-        # Create a public IP address and specify a DNS name
-        $pip = New-AzPublicIpAddress -ResourceGroupName $resourceGroup -Location $location -Name "appvmpublicdns$(Get-Random)" -AllocationMethod Static -IdleTimeoutInMinutes 4
+$appVnet = Initialize-AnfVirtualNetwork -ResourceGroup $ResourceGroup -Location $Location -Name 'App-VNet' `
+    -AddressPrefix $AppNetworkAddressPrefix -SubnetName 'App-subnet' -SubnetPrefix $AppSubnetAddressPrefix -TimeoutSeconds $TimeoutSeconds
+# Preserve the original resource name to avoid an accidental parallel VNet.
+$oracleVnet = Initialize-AnfVirtualNetwork -ResourceGroup $ResourceGroup -Location $Location -Name 'OracelVM-VNet' `
+    -AddressPrefix $OracleNetworkAddressPrefix -SubnetName 'OracleVM-subnet' -SubnetPrefix $OracleSubnetAddressPrefix -TimeoutSeconds $TimeoutSeconds
+$environment = Initialize-AnfEnvironment -ResourceGroup $ResourceGroup -Location $Location -AccountName $AnfAccountName `
+    -NetworkAddressPrefix $NetworkAddressPrefix -SubnetAddressPrefix $SubnetAddressPrefix `
+    -PoolSizeBytes ($PoolSizeTiB * 1TB) -ServiceLevel $ServiceLevel -TimeoutSeconds $TimeoutSeconds
+foreach ($volume in @(
+    @{ Name = "$AnfAccountName-volume-db"; Token = 'standard' },
+    @{ Name = "$AnfAccountName-volume-logs"; Token = 'standard2' }
+)) {
+    Initialize-AnfVolume -Environment $environment -Name $volume.Name -CreationToken $volume.Token `
+        -SizeBytes ($VolumeSizeGiB * 1GB) -ServiceLevel $ServiceLevel -Protocol NFSv3 `
+        -AllowedClients @($OracleSubnetAddressPrefix) -RootAccess $AllowRootAccess.IsPresent -TimeoutSeconds $TimeoutSeconds
+}
 
-        # Create an inbound network security group rule for port 3389
-        $nsgRuleRDP = New-AzNetworkSecurityRuleConfig -Name AppVMNSGRDP  -Protocol Tcp -Direction Inbound -Priority 1000 -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange 3389 -Access Allow
+foreach ($machine in @(
+    @{ Name = 'App-VM'; Nic = 'AppVM-nic'; Nsg = 'AppVMNSG'; Vnet = $appVnet; Subnet = 'App-subnet' },
+    @{ Name = 'OracleDB-VM'; Nic = 'OracleVM-nic'; Nsg = 'OracleVMNSG'; Vnet = $oracleVnet; Subnet = 'OracleVM-subnet' }
+)) {
+    $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $ResourceGroup -Location $Location -Name $machine.Nsg -ErrorAction Stop
+    $nic = New-AzNetworkInterface -Name $machine.Nic -ResourceGroupName $ResourceGroup -Location $Location `
+        -SubnetId ($machine.Vnet.Subnets | Where-Object Name -EQ $machine.Subnet).Id `
+        -NetworkSecurityGroupId $nsg.Id -ErrorAction Stop
+    $vm = New-AzVMConfig -VMName $machine.Name -VMSize $VmSize -SecurityType Standard
+    if ($machine.Name -eq 'App-VM') {
+        $vm = $vm | Set-AzVMOperatingSystem -Windows -ComputerName $machine.Name -Credential $Cred
+        $vm = $vm | Set-AzVMSourceImage -PublisherName MicrosoftWindowsServer -Offer WindowsServer -Skus $AppImageSku -Version $appImage.Version
+    } else {
+        # The Linux cmdlet requires a credential object even when password authentication is disabled.
+        $unusedPassword = [securestring]::new()
+        foreach ($value in [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)) {
+            $unusedPassword.AppendChar([char](33 + ($value % 94)))
+        }
+        $unusedPassword.MakeReadOnly()
+        $linuxCredential = [pscredential]::new($OracleAdminUsername, $unusedPassword)
+        $vm = $vm | Set-AzVMOperatingSystem -Linux -ComputerName $machine.Name -Credential $linuxCredential -DisablePasswordAuthentication
+        $vm = $vm | Add-AzVMSshPublicKey -KeyData $SshPublicKey -Path "/home/$OracleAdminUsername/.ssh/authorized_keys"
+        $vm = $vm | Set-AzVMSourceImage -PublisherName $OracleImagePublisher -Offer $OracleImageOffer `
+            -Skus $OracleImageSku -Version $oracleImage.Version
+        if ($plan) {
+            $vm = $vm | Set-AzVMPlan -Publisher $plan.Publisher -Product $plan.Product -Name $plan.Name
+        }
+    }
+    $vm = $vm | Add-AzVMNetworkInterface -Id $nic.Id
+    New-AzVM -ResourceGroupName $ResourceGroup -Location $Location -VM $vm -ErrorAction Stop | Out-Null
+    $vmName = $machine.Name
+    Wait-AnfState -TimeoutSeconds $TimeoutSeconds -Read {
+        Get-AzVM -ResourceGroupName $ResourceGroup -Name $vmName -ErrorAction Stop
+    }
+}
 
-        # Create a network security group
-        $nsg = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroup -Location $location -Name AppVMNSG -SecurityRules $nsgRuleRDP
-
-        # Create a virtual network card and associate with public IP address and NSG
-        $nic = New-AzNetworkInterface -Name "AppVM-nic" -ResourceGroupName $resourceGroup -Location $location -SubnetId $vnet.Subnets[0].Id -PublicIpAddressId $pip.Id -NetworkSecurityGroupId $nsg.Id
-
-        # Create a virtual machine configuration
-        $vmConfig = New-AzVMConfig -VMName $vmName -VMSize Standard_D2_v3 | `
-                Set-AzVMOperatingSystem -Windows -ComputerName $vmName -Credential $cred | `
-                Set-AzVMSourceImage -PublisherName MicrosoftWindowsServer -Offer WindowsServer -Skus 2016-Datacenter -Version latest | `
-                Add-AzVMNetworkInterface -Id $nic.Id
-
-        # Create a virtual machine
-        New-AzVM -ResourceGroupName $resourceGroup -Location $location -VM $vmConfig
-        Start-Sleep -Seconds 10
-        Write-Output "Virtual Machine App is created"
-#endregion     
-
-read-host "Press ENTER to continue for Deployment ANF Resources..."
-
-#Region Create ANF Resources with 2 Voluems for Oracle DB, NSG
-
-        #NetApp Account creation
-        # Create an NetApp Account
-        Write-Host "Creating new ANF Account $($anfAccountName)." 
-        New-AzNetAppFilesAccount -ResourceGroupName $resourceGroup -Location $location -Name $anfAccountName
-
-        #Capacity pool
-        #Create a capacity pool
-        $poolSizeBytes = 4398046511104 # 4TiB - firmly defined
-        Write-Host "Creating new ANF capacity pool $($PoolName) with a size of $($PoolSize) TiB. Service level: $($ServiceLevel)."
-        New-AzNetAppFilesPool -ResourceGroupName $resourceGroup -Location $location -AccountName $anfAccountName -Name $poolName -PoolSize $poolSizeBytes -ServiceLevel $serviceLevel
-
-        #Create volume (NFSv3) with VNet & Subnet (include subnet delegation)
-        $anfDelegation = New-AzDelegation -Name ([guid]::NewGuid().Guid) -ServiceName "Microsoft.NetApp/volumes"
-        Start-Sleep -s 25
-        $subnet2 = New-AzVirtualNetworkSubnetConfig -Name $VirtualSubnetName -AddressPrefix $SubnetAddressPrefix -Delegation $anfDelegation
-        Start-Sleep -s 25
-        $vnet2 = New-AzVirtualNetwork -Name $VirtualNetworkName -ResourceGroupName $resourceGroup -Location $location -AddressPrefix $NetworkAddressPrefix -Subnet $subnet2
-        Start-Sleep -s 25
-        $subnetId2 = $vnet2.Subnets[0].Id
-        Start-Sleep -s 10
-        $volumeSizeBytes = 107374182400 # 100GiB - firmly defined
-        New-AzNetAppFilesVolume -ResourceGroupName $resourceGroup -Location $location -AccountName $anfAccountName -PoolName $poolName -UsageThreshold $volumeSizeBytes -SubnetId $subnetId2 -CreationToken $CreationToken -ServiceLevel $serviceLevel -Name $volumeName1 -ProtocolType $Protocol
-        Start-Sleep -s 10
-        New-AzNetAppFilesVolume -ResourceGroupName $resourceGroup -Location $location -AccountName $anfAccountName -PoolName $poolName -UsageThreshold $volumeSizeBytes -SubnetId $subnetId2 -CreationToken $CreationToken2 -ServiceLevel $serviceLevel -Name $volumeName2 -ProtocolType $Protocol 
-        Start-Sleep -s 10
-        
-        
-     #Create OracelDB VM with VNet and Subnet
-        # Variables for common values
-        $vmName = "OracleDB-VM"
-        
-        Write-Output "Creating the Virtual Machine OracleDB"
-
-        # Create a subnet configuration
-        $subnetConfig3 = New-AzVirtualNetworkSubnetConfig -Name "OracleVM-subnet" -AddressPrefix 10.7.2.0/24
-
-        # Create a virtual network
-        $vnet3 = New-AzVirtualNetwork -ResourceGroupName $resourceGroup -Location $location -Name "OracelVM-VNet" -AddressPrefix 10.7.0.0/16 -Subnet $subnetConfig3
-
-        # Create a public IP address and specify a DNS name
-        $pip3 = New-AzPublicIpAddress -ResourceGroupName $resourceGroup -Location $location -Name "oraclevmpublicdns$(Get-Random)" -AllocationMethod Static -IdleTimeoutInMinutes 4
-
-        # Create an inbound network security group rule for port 3389
-        $nsgRuleRDP3 = New-AzNetworkSecurityRuleConfig -Name OracleVMNSGRDP  -Protocol Tcp -Direction Inbound -Priority 1000 -SourceAddressPrefix * -SourcePortRange * -DestinationAddressPrefix * -DestinationPortRange 3389 -Access Allow
-
-        # Create a network security group
-        $nsg3 = New-AzNetworkSecurityGroup -ResourceGroupName $resourceGroup -Location $location -Name OracleVMNSG -SecurityRules $nsgRuleRDP3
-
-        # Create a virtual network card and associate with public IP address and NSG
-        $nic3 = New-AzNetworkInterface -Name "OracleVM-nic" -ResourceGroupName $resourceGroup -Location $location -SubnetId $vnet3.Subnets[0].Id -PublicIpAddressId $pip3.Id -NetworkSecurityGroupId $nsg3.Id
-
-        # Create a virtual machine configuration
-        $vmConfig = New-AzVMConfig -VMName $vmName -VMSize Standard_D2_v3 | `
-                Set-AzVMOperatingSystem -Windows -ComputerName $vmName -Credential $cred | `
-                Set-AzVMSourceImage -PublisherName oracle -Offer oracle-database-19-3 -Skus oracle-database-19-0904 -Version latest | `
-                Add-AzVMNetworkInterface -Id $nic3.Id
-
-        # Create a virtual machine
-        New-AzVM -ResourceGroupName $resourceGroup -Location $location -VM $vmConfig
-        Start-Sleep -Seconds 10
-        Write-Output "Virtual Machine OracleDB is created"
-#endregion
-
-read-host "Press ENTER to continue for VNet-Peering..."
-
-#region
-     #VNet-Peering VNet1 to VNet 2
-        Write-Output "Creating Virtual Network Peering"
-        Add-AzVirtualNetworkPeering -Name PeeringAppVMtoOracleVM -VirtualNetwork $vnet -RemoteVirtualNetworkId $vnet3.Id
-        Start-Sleep -Seconds 10
-        Add-AzVirtualNetworkPeering -Name PeeringOracleVMtoAPPVM -VirtualNetwork $vnet3 -RemoteVirtualNetworkId $vnet.Id
-        Start-Sleep -Seconds 10
-        Write-Output "Virtual Network Peering is created"
-
-     #VNet-Peering VNet2 to VNet 3
-        Write-Output "Creating Virtual Network Peering"
-        Add-AzVirtualNetworkPeering -Name PeeringOracleVMtoANFVolume -VirtualNetwork $vnet3 -RemoteVirtualNetworkId $vnet2.Id
-        Start-Sleep -Seconds 10
-        Add-AzVirtualNetworkPeering -Name PeeringANFVolumetoOracleVM -VirtualNetwork $vnet2 -RemoteVirtualNetworkId $vnet3.Id
-        Start-Sleep -Seconds 10
-        Write-Output "Virtual Network Peering is created"
-#endregion
-
-
-#End of Deployment
-Write-Output "Deployment has finished!!!"
-
-
-
-#region - Cleanup ressources
-    #Delete ResourceGroup with all ressources in there
-#       Remove-AzResourceGroup -Name $ResourceGroup
-#endregion
+$anfVnet = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroup -Name "$AnfAccountName-vnet" -ErrorAction Stop
+$peerings = @(
+    @{ Name = 'PeeringAppVMtoOracleVM'; Local = $appVnet; Remote = $oracleVnet },
+    @{ Name = 'PeeringOracleVMtoAPPVM'; Local = $oracleVnet; Remote = $appVnet },
+    @{ Name = 'PeeringOracleVMtoANFVolume'; Local = $oracleVnet; Remote = $anfVnet },
+    @{ Name = 'PeeringANFVolumetoOracleVM'; Local = $anfVnet; Remote = $oracleVnet }
+)
+foreach ($peering in $peerings) {
+    $localVnet = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroup -Name $peering.Local.Name -ErrorAction Stop
+    $existingPeering = $localVnet.VirtualNetworkPeerings | Where-Object Name -EQ $peering.Name
+    if ($existingPeering) {
+        Assert-AnfValue "$($peering.Name) remote VNet" $existingPeering.RemoteVirtualNetwork.Id $peering.Remote.Id
+    } else {
+        Add-AzVirtualNetworkPeering -Name $peering.Name -VirtualNetwork $localVnet `
+            -RemoteVirtualNetworkId $peering.Remote.Id -ErrorAction Stop | Out-Null
+    }
+}
+foreach ($peering in $peerings) {
+    Wait-AnfState -Property PeeringState -Success Connected -TimeoutSeconds $TimeoutSeconds -Read {
+        $vnet = Get-AzVirtualNetwork -ResourceGroupName $ResourceGroup -Name $peering.Local.Name -ErrorAction Stop
+        $vnet.VirtualNetworkPeerings | Where-Object Name -EQ $peering.Name
+    } | Out-Null
+}
+Write-Output 'Infrastructure deployment completed. Configure private administration access, NFS mounts and the Oracle database separately.'
