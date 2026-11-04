@@ -21,33 +21,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/../scripts/Deployment.Common.ps1"
-$TemplateFile = (Resolve-Path -LiteralPath $TemplateFile -ErrorAction Stop).Path
-$TemplateParameterFile = (Resolve-Path -LiteralPath $TemplateParameterFile -ErrorAction Stop).Path
-$template = Get-Content -LiteralPath $TemplateFile -Raw | ConvertFrom-Json -AsHashtable
-$parameterDocument = Get-Content -LiteralPath $TemplateParameterFile -Raw | ConvertFrom-Json -AsHashtable
-$parameters = @{}
-foreach ($name in $parameterDocument.parameters.Keys) {
-    if (-not $template.parameters.ContainsKey($name)) {
-        throw "Unknown template parameter '$name'."
-    }
-    if (-not $parameterDocument.parameters[$name].ContainsKey('value')) {
-        throw "Parameter '$name' must contain a value. Key Vault references are not supported by this wrapper."
-    }
-    $parameters[$name] = $parameterDocument.parameters[$name].value
-}
-# The script's explicit location always wins over a parameter-file location.
-$parameters.location = $Location
-foreach ($name in $template.parameters.Keys) {
-    if (-not $template.parameters[$name].ContainsKey('defaultValue') -and -not $parameters.ContainsKey($name)) {
-        throw "Missing required template parameter '$name'."
-    }
-    if (-not $parameters.ContainsKey($name)) {
-        $parameters[$name] = $template.parameters[$name].defaultValue
-    }
-}
-Assert-AnfNetwork -Network $parameters.netappVirtualNetworkAddressPrefix `
-    -Subnet $parameters.netappVirtualNetworkSubnetAddressPrefix -AllowedClients $parameters.netappAllowedClients
-Assert-AnfCapacity -PoolSizeBytes $parameters.netappPoolSize -VolumeSizeBytes $parameters.netappVolumeSize
+$inputData = Get-AnfTemplateInput -TemplateFile $TemplateFile -TemplateParameterFile $TemplateParameterFile -Location $Location
 
 if (-not $PSCmdlet.ShouldProcess("Subscription $SubscriptionId; $ResourceGroup/$Location",
     "Validate ARM template and $(if ($Preview) { 'request read-only ARM What-If' } else { 'deploy incrementally' }); provider registration: $($RegisterProviders -and -not $Preview)")) {
@@ -66,13 +40,10 @@ if ($Preview) {
 }
 
 $deployment = @{
-    ResourceGroupName = $ResourceGroup; TemplateFile = $TemplateFile
-    TemplateParameterObject = $parameters; ErrorAction = 'Stop'
+    ResourceGroupName = $ResourceGroup; TemplateFile = $inputData.TemplateFile
+    TemplateParameterObject = $inputData.Parameters; ErrorAction = 'Stop'
 }
-$validationErrors = @(Test-AzResourceGroupDeployment @deployment)
-if ($validationErrors.Count -gt 0) {
-    throw "ARM validation failed: $($validationErrors | ConvertTo-Json -Depth 10 -Compress)"
-}
+Assert-AnfArmValidation -Deployment $deployment
 if ($Preview) {
     Get-AzResourceGroupDeploymentWhatIfResult @deployment
 } else {
