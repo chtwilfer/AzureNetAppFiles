@@ -1,5 +1,8 @@
 # Oracle infrastructure on Azure with ANF volumes
 
+This is an advanced, infrastructure-only example. For a short, ready-to-walk
+through ANF customer demo, use the [single-region demo](../demo/README.md) instead.
+
 This example creates **infrastructure only**:
 
 - A Windows Server 2022 application VM (`App-VM`).

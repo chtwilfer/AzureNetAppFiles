@@ -1,5 +1,9 @@
 # Azure NetApp Files with ARM JSON
 
+For an end-to-end customer demonstration including a client, NFS usage, snapshot
+file recovery and cleanup, start with the [single-region demo](../demo/README.md).
+This ARM example remains an alternative for showing template-based infrastructure.
+
 Creates one ANF account, capacity pool, delegated VNet/subnet and NFS volume.
 Use PowerShell 7.4+ and explicitly install `Az.Accounts` and `Az.Resources`.
 Authenticate with `Connect-AzAccount` before deployment.
