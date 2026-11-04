@@ -1,0 +1,74 @@
+name: Quality checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-2025
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PSSCRIPTANALYZER_VERSION: '1.25.0'
+      POWERSHELL_TELEMETRY_OPTOUT: '1'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check PowerShell version
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion -lt [version]'7.4') {
+              throw 'PowerShell 7.4 or newer is required.'
+          }
+          $PSVersionTable
+
+      - name: Run offline tests and JSON/template checks
+        run: ./tests/Run-Tests.ps1
+
+      - name: Install pinned PSScriptAnalyzer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module -Name PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION `
+              -Repository PSGallery -Scope CurrentUser -Force -ErrorAction Stop
+
+      - name: Analyze deployment scripts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION -ErrorAction Stop
+          $scripts = @(Get-ChildItem -Path . -Recurse -Filter '*.ps1' | Where-Object {
+              $relativePath = [System.IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName)
+              $relativePath -notmatch '^tests[\\/]'
+          })
+          if ($scripts.Count -eq 0) {
+              throw 'No deployment scripts were found for analysis.'
+          }
+          $issues = @($scripts | Invoke-ScriptAnalyzer -Severity Error,Warning -ErrorAction Stop)
+          if ($issues.Count -gt 0) {
+              $issues | Format-Table ScriptName, Line, RuleName, Message -AutoSize -Wrap
+              throw "PSScriptAnalyzer reported $($issues.Count) warning(s) or error(s)."
+          }
+          Write-Output "PSScriptAnalyzer ${env:PSSCRIPTANALYZER_VERSION}: $($scripts.Count) deployment scripts passed."
