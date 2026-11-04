@@ -1,359 +1,395 @@
-# Azure NetApp Files PowerShell examples
+# Azure NetApp Files customer demos
 
-PowerShell and ARM examples for short Azure NetApp Files (ANF) customer demos.
-These are **paid, disposable demo deployments**, not a production platform,
-database or disaster recovery solution.
+Disposable PowerShell/ARM examples for short Azure NetApp Files (ANF) customer
+presentations, **not a production platform, database or disaster recovery
+solution**. All setup, demonstration and cleanup instructions are in this file.
+Run commands from the repository root.
 
-## Start here: one-region customer demo
+**Live Azure deployment, real NFS/snapshot recovery and end-to-end cleanup remain
+unverified.** Offline checks do not establish deployment compatibility.
 
-The recommended path now includes a private Ubuntu NFS client operated through
-**Azure Run Command**, with no inbound SSH, VPN or Bastion requirement:
+| Start here | Purpose |
+|---|---|
+| [Single-region customer demo](#single-region-customer-demo) | Recommended: private Linux client, NFS usage, snapshot file recovery and guarded cleanup |
+| [ARM JSON](#arm-json) | Alternative: single-region infrastructure through a template |
+| [Two independent regions](#two-independent-regions) | Infrastructure in two regions; **no replication** |
+| [Oracle infrastructure](#oracle-infrastructure) | Advanced infrastructure example; **no database setup** |
+| [Azure preflight validation](#azure-preflight-validation) | Read-only Azure checks for the ARM JSON scenario |
+| [Offline quality checks](#offline-quality-checks) | Local/CI checks without Azure credentials |
 
-**Deploy -> mount/write/read -> snapshot -> change file -> restore file -> cleanup**
+## Requirements
 
-Follow the [customer demo walkthrough](demo/README.md) for prerequisites, costs,
-portal talking points, troubleshooting and deletion safeguards. Edit the
-[sample configuration](demo/demo.parameters.psd1), authenticate explicitly and
-run from the repository root:
+Use **PowerShell 7.4+** on Windows, Linux or macOS; Windows PowerShell 5.1/ISE is
+not supported. Install modules explicitly, then authenticate:
+
+```powershell
+# Recommended customer demo and two-region example:
+Install-Module Az.Accounts, Az.Resources, Az.Network, Az.NetAppFiles, Az.Compute -Scope CurrentUser
+# Additionally for Oracle deployment or optional Oracle preflight image checks:
+Install-Module Az.MarketplaceOrdering -Scope CurrentUser
+Connect-AzAccount
+Get-AzSubscription
+```
+
+The two-region script does not need `Az.Compute`; ARM JSON and its basic
+preflight need only `Az.Accounts` and `Az.Resources`. Scripts never install
+modules, change execution policy or accept Marketplace terms. Automation may
+authenticate separately using a managed identity/service principal.
+
+Before a meeting, verify regional ANF availability, quota/capacity, VM size and
+image availability, permissions and connectivity. Resource-group creation needs
+subscription-level permissions; other operations need appropriate resource
+permissions. The client demo also needs
+`Microsoft.Compute/virtualMachines/runCommand/action`. Policy, locks, deny
+assignments and outbound restrictions may block operations; no roles, policy
+exemptions or PIM access are configured.
+
+Register `Microsoft.NetApp` and `Microsoft.Network`, plus `Microsoft.Compute` for
+VM scenarios. Deployment scripts register providers only with explicit
+`-RegisterProviders` permission/approval. Use region identifiers such as
+`westeurope`, explicit subscription IDs and canonical IPv4 CIDRs.
+
+All deployment/preflight entry points support `-WhatIf` and `-Confirm`.
+**`-WhatIf` is an offline input check and operation summary, not an Azure
+resource-level change calculation.** It does not import Az modules, authenticate,
+register providers or access resources. Polling defaults to 900 seconds per wait
+(`-TimeoutSeconds`); synchronous Az calls have their own durations.
+No scenario performs automatic rollback: partial failures may leave billable
+resources.
+
+## Single-region customer demo
+
+[`Invoke-AnfDemo.ps1`](Invoke-AnfDemo.ps1) provides:
+**Deploy -> Prepare -> Snapshot -> Change -> Restore -> Cleanup**.
+Deploy and Prepare belong **before** the meeting; Azure provisioning and Run
+Command may take several minutes, with no guaranteed completion time.
+
+### Resources and access
+
+Everything is created in a **new, dedicated** group `anfdemo-<DemoId>`.
+
+| Resource | Configuration |
+|---|---|
+| ANF account/pool | `anf-<DemoId>`, Standard, **4 TiB** pool |
+| Volume | `demo-volume`, 100 GiB, NFSv3, export `demo`, visible snapshot directory |
+| VNet | `10.42.0.0/16`; ANF subnet `10.42.2.0/24`, client subnet `10.42.1.0/24` |
+| Ubuntu 24.04 LTS VM | `demo-client`, `Standard_D2s_v5`, Standard SSD OS disk, private IP `10.42.1.4` |
+| Administration | Azure Run Command; no VM public IP, inbound SSH/RDP, VPN or Bastion |
+| Outbound connectivity | Standard NAT gateway and outbound-only Standard public IP for Azure services and Ubuntu repositories |
+
+An NSG on the client subnet/NIC denies inbound connections; stateful responses to
+client-initiated traffic remain permitted. Default outbound rules are retained.
+The NAT public IP is not assigned to the VM and provides no inbound access.
+There is no peering with existing networks. A generated provisioning SSH key's
+private half is discarded; there is intentionally no SSH login path.
+
+NFS permits only **`10.42.1.4/32`**. Root access is deliberately enabled because
+Run Command executes as root; do not copy this setting into production.
+The group and supported client/network resources carry `anfDemo`, `demoId`,
+`purpose` and `expiresOn` tags. ANF children use deterministic names; group tags
+are not inherited. **Expiry defaults to eight hours and is a reminder, not
+automatic deletion.** The 4 TiB/100 GiB baseline is conservative, not a claim
+about Azure's current minimum sizes.
+
+### Prepare before the meeting
+
+Edit [`demo/demo.parameters.psd1`](demo/demo.parameters.psd1): replace the
+subscription placeholder, choose a region and a unique, non-sensitive DemoId.
+IDs must be 3-16 lowercase characters, start with a letter, end with a letter or
+digit, and otherwise contain only letters, digits and hyphens.
 
 ```powershell
 $demo = Import-PowerShellDataFile ./demo/demo.parameters.psd1
 ./Invoke-AnfDemo.ps1 @demo -Action Deploy -WhatIf
+# Billable; add -RegisterProviders only if needed and authorized:
 ./Invoke-AnfDemo.ps1 @demo -Action Deploy
 ./Invoke-AnfDemo.ps1 @demo -Action Prepare
+```
+
+Deploy returns the resolved Ubuntu image version (`latest` is resolved anew for
+each fresh demo). `-VmSize` selects an available compatible size;
+`-ExpiresInHours` changes the expiry reminder.
+
+Prepare waits for cloud-init, installs `nfs-common` if missing, mounts the export
+at `/mnt/anf-demo`, and initializes `customer-demo/example.txt`. Output shows
+original content and its SHA-256 hash. Repeat runs preserve existing demo data
+and refuse unexpected mounts or a nonempty local mount directory.
+
+**Complete Prepare successfully before the presentation.** The VM needs outbound
+HTTPS for its agent/Run Command and access to Ubuntu package sources. NAT does
+not bypass firewall policy. If the agent is not ready, wait and retry Prepare;
+guest errors or missing completion markers fail explicitly with diagnostic
+output. This path has no resource-level Azure preview; the ARM preflight below
+does not validate the client/NAT deployment.
+
+### Present to the customer
+
+Open the group in the portal and show the account, pool, volume, NFSv3 protocol,
+delegated subnet and restricted export. Prepare has demonstrated real NFS
+writing/reading when run in Azure. Then execute these steps individually:
+
+```powershell
+# Verify and flush original data BEFORE creating demo-baseline; show it in the portal:
 ./Invoke-AnfDemo.ps1 @demo -Action Snapshot
+# Show changed content and a different hash:
 ./Invoke-AnfDemo.ps1 @demo -Action Change
+# Recover the original content/hash and compare it with the snapshot:
 ./Invoke-AnfDemo.ps1 @demo -Action Restore
+```
+
+Restore copies only
+`/mnt/anf-demo/.snapshot/demo-baseline/customer-demo/example.txt` back to the
+example file. **This is file-level snapshot recovery, not a volume revert,
+backup/DR solution, database-consistent recovery or performance benchmark.**
+Other files remain untouched; never put real customer data in this environment.
+
+Change/Restore can be repeated against the same baseline. Snapshot refuses an
+existing baseline rather than overwriting it; use a fresh demo for a new initial
+state. After a VM restart, rerun Prepare to remount; no `/etc/fstab` entry is
+created. Run Command is not interactive; do not run steps concurrently or
+manually change demo files during a step.
+
+### Cleanup and failure recovery
+
+**ANF capacity, VM, disks, NAT and public IP incur charges. Stopping the VM does
+not stop other charges.** Pricing depends on region, runtime and subscription.
+
+```powershell
+# Offline target/deletion summary only; no inventory query:
+./Invoke-AnfDemo.ps1 @demo -Action Cleanup -WhatIf
+# Inspect the displayed inventory, then confirm permanent deletion:
 ./Invoke-AnfDemo.ps1 @demo -Action Cleanup
 ```
 
-Deploy and Prepare belong **before** the meeting. Cleanup deletes all demo data
-and asks for confirmation after ownership and inventory checks. This path uses
-one 4 TiB ANF pool, a VM, NAT gateway and outbound public IP, all billable.
-Expiry tags are reminders, not automated cleanup. Live Azure verification is
-still outstanding.
+Cleanup reselects the subscription, checks group ownership/location and rejects
+resource IDs outside the known demo inventory. It deletes **the entire group,
+all data and snapshots**, and checks deletion completion. Tags guard accidental
+deletion, not authorization: never retag an existing group to pass this check or
+add unrelated resources. Resource-list APIs may omit children; all children are
+deleted with their dedicated demo parents. No other groups are searched and
+expired demos are not deleted automatically.
 
-## Available scenarios
+Deploy refuses every existing target group, including partial deployments; it
+does not adopt resources or resume a partial VM. After failure, inspect the group,
+then run Cleanup with the same configuration. A partially populated, correctly
+tagged group is eligible. Redeploy only after deletion finishes. Missing/changed
+tags, unexpected resources, locks or permission failures require manual review,
+not bypassing safeguards. Fix reported guest/connectivity/data errors before
+retrying; never create a replacement baseline over changed data.
 
-| Entry point | Resources |
-|---|---|
-| [`Invoke-AnfDemo.ps1`](demo/README.md) **recommended** | One region, ANF volume, private Linux client, NFS read/write, snapshot file recovery and guarded cleanup |
-| [`ANF-PoC-Deployment.ps1`](ANF-PoC-Deployment.ps1) | Two independent regions, each with a resource group, delegated VNet/subnet, ANF account, pool and NFS volume; optional snapshots |
-| [`ANF with JSON`](ANF%20with%20JSON/Readme.md) | One ANF environment using an ARM JSON template |
-| [`Oracle on Azure`](Oracle%20on%20Azure/Readme.md) | Windows application VM, Linux Oracle VM, two ANF volumes and VNet peerings |
-| [`Test-AzureDeployment.ps1`](Test-AzureDeployment.ps1) | Read-only Azure prerequisite checks, ARM validation and What-If for the single-region ANF template; optional Oracle/application image checks |
+## ARM JSON
 
-## Requirements
+[`ANF with JSON/ANF_JSON_Deployment.ps1`](ANF%20with%20JSON/ANF_JSON_Deployment.ps1)
+creates one account, pool, delegated VNet/subnet and NFS volume, **without a
+client**. Edit
+[`azuredeploy.parameters.json`](ANF%20with%20JSON/azuredeploy.parameters.json):
+names, ranges, actual allowed client CIDRs, protocol and sizes. Samples use
+4 TiB (`4398046511104` bytes) and 100 GiB (`107374182400` bytes); pool sizes must
+be whole TiB, at least 4 TiB, and volume quota at least 100 GiB and no larger than
+the pool. NFSv3/NFSv4.1 are supported; root access defaults to false.
+The sample client `10.3.1.0/24` is a placeholder, not established connectivity.
 
-- PowerShell **7.4 or newer** on Windows, Linux or macOS; Windows PowerShell
-  5.1/ISE is no longer supported.
-- Install the required Az modules explicitly before deployment. Scripts never
-  install/update modules or change your execution policy:
+```powershell
+$arm = @{
+    SubscriptionId = '<subscription-guid>'
+    ResourceGroup = 'anf-json-poc'
+    Location = 'westeurope'
+}
+& './ANF with JSON/ANF_JSON_Deployment.ps1' @arm -WhatIf
+# Requires an existing group and registered providers; does not create resources:
+& './ANF with JSON/ANF_JSON_Deployment.ps1' @arm -Preview
+# Creates the group if missing, validates and deploys incrementally:
+& './ANF with JSON/ANF_JSON_Deployment.ps1' @arm
+```
 
-  ```powershell
-  Install-Module Az.Accounts, Az.Resources, Az.Network, Az.NetAppFiles -Scope CurrentUser
-  # Additionally, for the Oracle infrastructure example:
-  Install-Module Az.Compute, Az.MarketplaceOrdering -Scope CurrentUser
-  ```
+Preview intentionally fails for a missing group; create a dedicated empty group
+first if needed. `-TemplateFile`/`-TemplateParameterFile` accept local alternatives;
+defaults resolve beside the script. `-Location` overrides file values. Only
+ordinary parameter `value` entries are supported, not Key Vault `reference`.
+The wrapper rejects unrestricted `0.0.0.0/0` exports and checks CIDR/capacity;
+direct JSON deployment requires equivalent checks beyond ARM constraints.
 
-- The recommended single-region demo additionally needs `Az.Compute`, but not
-  `Az.MarketplaceOrdering`; see its [setup instructions](demo/README.md).
-- The offline command-contract baseline is **Az 16.5.0**, with exact component
-  versions in [`tests/QualityTools.psd1`](tests/QualityTools.psd1). This checks
-  command metadata, not a live deployment certification. Record the versions
-  used in your deployment environment with `Get-Module Az.* -ListAvailable`.
-- Authenticate explicitly, then pass the intended subscription to each script:
-
-  ```powershell
-  Connect-AzAccount
-  Get-AzSubscription
-  # Automation can authenticate separately with a managed identity/service principal.
-  ```
-
-- Resource creation requires suitable permissions on the target subscription or
-  resource groups. Resource-group creation needs subscription-level permissions.
-  Provider registration needs the relevant registration permissions.
-- `Microsoft.NetApp` and `Microsoft.Network` must be registered; scenarios with
-  client/Oracle VMs also require `Microsoft.Compute`. Registration is performed only
-  when `-RegisterProviders` is explicitly supplied. It has a bounded wait.
-- Check ANF region availability, subscription quota, capacity, image availability
-  and network connectivity before deployment. Network arguments use canonical
-  IPv4 CIDRs; region arguments use identifiers such as `westeurope`.
+**Use a dedicated VNet.** The template owns its address space and inline subnet
+list: incremental deployment may remove undeclared subnets/settings. Review
+Preview before updating existing resources. Outputs are `accountId`, `poolId`,
+`volumeId`, `subnetId`. APIs are NetApp `2026-08-01` and Network `2026-03-01`;
+validate availability in your cloud. No automatic cleanup is provided.
 
 ## Two independent regions
 
-Use your own subscription ID, names and non-conflicting network ranges:
+[`ANF-PoC-Deployment.ps1`](ANF-PoC-Deployment.ps1) creates an ANF environment in
+each region, without clients or cross-region replication:
 
 ```powershell
-$deployment = @{
+$regions = @{
     SubscriptionId = '<subscription-guid>'
-    Location = 'westeurope'
-    ResourceGroup = 'anf-poc-west'
-    AnfAccountName = 'anfpocwest'
-    CreationToken = 'poc-west'
-    NetworkAddressPrefix = '10.10.0.0/16'
-    SubnetAddressPrefix = '10.10.2.0/24'
+    Location = 'westeurope'; ResourceGroup = 'anf-poc-west'
+    AnfAccountName = 'anfpocwest'; CreationToken = 'poc-west'
+    NetworkAddressPrefix = '10.10.0.0/16'; SubnetAddressPrefix = '10.10.2.0/24'
     AllowedClients = @('10.10.1.0/24')
-    SecondLocation = 'northeurope'
-    SecondResourceGroup = 'anf-poc-north'
-    SecondAnfAccountName = 'anfpocnorth'
-    SecondCreationToken = 'poc-north'
-    SecondNetworkAddressPrefix = '10.20.0.0/16'
-    SecondSubnetAddressPrefix = '10.20.2.0/24'
+    SecondLocation = 'northeurope'; SecondResourceGroup = 'anf-poc-north'
+    SecondAnfAccountName = 'anfpocnorth'; SecondCreationToken = 'poc-north'
+    SecondNetworkAddressPrefix = '10.20.0.0/16'; SecondSubnetAddressPrefix = '10.20.2.0/24'
     SecondAllowedClients = @('10.20.1.0/24')
 }
-
-./ANF-PoC-Deployment.ps1 @deployment -WhatIf
-# Review the inputs before executing without -WhatIf:
-./ANF-PoC-Deployment.ps1 @deployment
+./ANF-PoC-Deployment.ps1 @regions -WhatIf
+./ANF-PoC-Deployment.ps1 @regions
 ```
 
-Defaults remain **4 TiB per pool**, **100 GiB per volume**, Standard service level
-and NFSv3. `-PoolSizeTiB`, `-VolumeSizeGiB`, `-ServiceLevel` and `-Protocol`
-configure both regions. NFSv4.1 is also supported. The example deliberately keeps
-the conservative 4 TiB/100 GiB baseline; these are not claims about the current
-minimum sizes offered by Azure.
+Defaults per region: 4 TiB pool, 100 GiB volume, Standard, NFSv3.
+`-PoolSizeTiB`, `-VolumeSizeGiB`, `-ServiceLevel`, `-Protocol` (also NFSv4.1)
+configure both. Snapshots are opt-in with `-CreateSnapshots`; `-SnapshotName`
+defaults to `MyAnfSnapshot`. Existing snapshots are retained, not refreshed.
+Matching resources are reused; managed configuration drift aborts without
+replacing resources or widening access. Existing VNets must contain the expected
+subnet/delegation; other unmanaged settings are not reconciled.
+NFS exports reject `0.0.0.0/0`; root access needs explicit `-AllowRootAccess`.
+Client routing and filesystem permissions must be arranged separately.
 
-Snapshots are now **opt-in** with `-CreateSnapshots`. `-SnapshotName` defaults to
-`MyAnfSnapshot`; an existing snapshot with the same name is retained, not refreshed.
-Use another name to take a new snapshot. **Cross-region replication is not
-implemented**; the two volumes remain independent.
+## Oracle infrastructure
 
-## Preview, repeat runs and failures
+[`OracleDB-ANF-PoC-Deployment.ps1`](Oracle%20on%20Azure/OracleDB-ANF-PoC-Deployment.ps1)
+creates a private Windows Server 2022 application VM, Linux Oracle Marketplace
+VM, one 4 TiB pool, two 100 GiB NFSv3 volumes and three VNets.
+Bidirectional peerings connect App-to-Oracle and Oracle-to-ANF. Peering is not
+transitive: App has no direct ANF connection.
 
-- All entry points support `-WhatIf` and `-Confirm`. `-WhatIf` validates local
-  inputs and prints a scenario-level operation summary, without importing Az
-  modules, authenticating, registering providers or writing Azure resources.
-  It is not a resource-by-resource Azure change calculation.
-- The ARM entry point additionally offers `-Preview` for an Azure ARM What-If
-  against an **existing resource group**. Providers must already be registered.
-  Preview does not create the group or register providers.
-- The existing infrastructure scripts reuse matching accounts, pools, VNets, volumes and
-  snapshots. Managed configuration differences stop execution rather than
-  silently replacing resources or widening access. Existing VNets must already
-  contain the expected subnet and delegation. Other unmanaged settings are not
-  reconciled. Use dedicated PoC resources.
-- The recommended single-region demo instead requires a new resource group on
-  Deploy. Use its Prepare/Snapshot/Change/Restore steps afterwards; after a
-  partial deployment, inspect and clean up before deploying again.
-- The ARM template owns its VNet and inline subnet. Incremental mode does **not**
-  mean that unrelated subnets/settings on that VNet will be preserved. Do not
-  point this template at a shared VNet; review `-Preview` before redeploying.
-- Oracle VM/NIC/NSG resources are deliberately **not adopted or overwritten** on
-  a repeat run. Existing resources with the expected names cause an explicit
-  failure; see the Oracle README for recovery after a partial deployment.
-- Azure command failures stop the script. Provider/resource polling has a
-  configurable `-TimeoutSeconds` (default 900 per wait). Synchronous Az command
-  durations are governed by Az itself, not this polling timeout.
-- Deployments are not transactional. A failure can leave billable resources.
-  No automatic rollback or deletion is performed.
-
-## Azure preflight validation
-
-[`Test-AzureDeployment.ps1`](Test-AzureDeployment.ps1) checks the single-region
-ANF ARM scenario against Azure **without deploying it**. First edit the
-[sample parameters](ANF%20with%20JSON/azuredeploy.parameters.json) for your
-environment. Authenticate explicitly and use a pre-existing, dedicated test
-resource group:
+**Infrastructure only:** no database initialization, mounts, Oracle Direct NFS,
+listener rules, Bastion/VPN/NAT, performance or licensing validation. Arrange
+private administration and outbound access separately. Default NSG rules permit
+virtual-network/peered traffic, not Internet-wide SSH/RDP.
 
 ```powershell
-Connect-AzAccount
-$validation = @{
-    SubscriptionId = '<subscription-guid>'
-    ResourceGroup = 'anf-validation-test'
-    Location = 'westeurope'
+$oracle = @{
+    SubscriptionId = '<subscription-guid>'; Location = 'westeurope'
+    ResourceGroup = 'oracle-anf-poc'; AnfAccountName = 'oracleanfpoc'
+    Cred = Get-Credential -Message 'Windows application VM administrator'
+    SshPublicKey = (Get-Content ~/.ssh/id_ed25519.pub -Raw).Trim()
 }
-
-# Local parameter checks and operation summary only; no Azure connection:
-./Test-AzureDeployment.ps1 @validation -WhatIf
-
-# Real Azure queries, ARM validation and incremental What-If:
-$result = ./Test-AzureDeployment.ps1 @validation
-$result | Select-Object SubscriptionId, ResourceGroup, Location, ValidationStatus
-$result.ResourceCapabilities | Format-Table
-$result.WhatIfResult
+& './Oracle on Azure/OracleDB-ANF-PoC-Deployment.ps1' @oracle -WhatIf
+& './Oracle on Azure/OracleDB-ANF-PoC-Deployment.ps1' @oracle
 ```
 
-The script requires PowerShell 7.4+, `Az.Accounts` and `Az.Resources`. It checks:
+Supply a public key value, never a private key or filename. Default Oracle image:
+`oracle:oracle-database-19-3:oracle-database-19-0904:latest`. Availability is checked
+before resource creation; purchase-plan terms must already be accepted. VM
+security type is `Standard` for the original generation-1 image.
+Override `-OracleImagePublisher`, `-OracleImageOffer`, `-OracleImageSku`,
+`-OracleImageVersion`; a concrete version improves reproducibility.
 
-- The selected subscription is enabled and the resource group exists.
-- `Microsoft.NetApp` and `Microsoft.Network` are already registered.
-- The target region and literal stable API versions are advertised by the
-  subscription for each resource type in the template.
-- Effective control-plane permissions at the resource-group scope allow the
-  baseline deployment/validation/What-If, resource read/write and subnet join
-  actions. Permission pages are combined with `NotActions` applied per grant.
-- Azure accepts the template validation and returns a successful incremental
-  ARM What-If. The complete preview is returned for inspection, not applied.
+Defaults: App `10.5.0.0/16`/`10.5.2.0/24`, ANF `10.6.0.0/16`/`10.6.2.0/24`,
+Oracle `10.7.0.0/16`/`10.7.2.0/24`. VNets must not overlap. Only the Oracle
+subnet is exported; root access is off unless `-AllowRootAccess` is specified.
+Options include `-OracleAdminUsername`, `-VmSize`, `-AppImageSku`,
+`-PoolSizeTiB`, `-VolumeSizeGiB`, `-ServiceLevel` and network parameters.
 
-Use the **identity intended for deployment**, not merely a Reader account.
-Validation/What-If do not change infrastructure but require deployment-related
-write permissions. The identity also needs subscription/provider/location reads,
-`Microsoft.Authorization/permissions/read` at the resource group, and resource
-read access. These checks do not assign roles or activate PIM access.
-Resource-group-level grants are the conservative baseline: permissions granted
-only on individual existing resources may not satisfy it.
+Matching ANF/VNet resources are reused. Existing VMs/NICs/NSGs cause failure,
+not adoption/overwrite. After partial failure, inspect and explicitly remove or
+migrate conflicting resources before retrying; do not delete data volumes to
+bypass checks. The historical name `OracelVM-VNet` is intentionally retained.
 
-To check the Oracle scenario's Linux image, Windows application image and any
-Marketplace purchase-plan acceptance as well:
-
-```powershell
-# Also requires explicitly installed Az.Compute and Az.MarketplaceOrdering:
-$result = ./Test-AzureDeployment.ps1 @validation -CheckOracleImages
-$result.Images | Format-Table
-```
-
-Image defaults match the Oracle deployment script. Optional overrides are
-`-OracleImagePublisher`, `-OracleImageOffer`, `-OracleImageSku`,
-`-OracleImageVersion` and `-AppImageSku`. `latest` is resolved and the selected
-versions are included in the result. Marketplace terms are checked, **never
-accepted**. Without `-CheckOracleImages`, no Compute module/provider or image
-queries are required and the result explicitly marks image checks as not run.
-
-`-TemplateFile` and `-TemplateParameterFile` can select local variants of the
-repository's single-region ANF template; location is always supplied explicitly.
-This is not a general ARM validator: nested resources/deployments, other resource
-types, computed API versions and other location expressions are rejected before
-Azure access. No registration, resource-group creation, deployment, deletion,
-permission assignment or local report file is performed. The active Azure
-subscription context is selected for the current process with autosave disabled.
-
-**A successful preflight is not a deployment guarantee.** Effective grant checks
-do not independently evaluate deny assignments, RBAC conditions, Azure Policy,
-locks, quotas or live regional capacity. ARM may catch some of these, but What-If
-can also contain incomplete/ignored changes; inspect the full result and its
-diagnostics. The script does not check client routing, NFS mounts, VM sizes,
-Oracle licensing or database operation. Optional image checks do not validate
-the Oracle network/VM deployment. A later real deployment still requires separate
-authorization and may incur costs.
-
-The script is run manually, not by the credential-free GitHub Actions workflow.
-Offline regression tests simulate Azure responses; a real run requires your
-Azure login and target subscription/resource group.
-
-## Network and access changes
-
-NFS clients must be supplied explicitly; `0.0.0.0/0` is rejected by the
-PowerShell entry points. Client networks also need real connectivity; an export
-rule alone does not establish routing or peering. The infrastructure-only examples disable root access unless
-`-AllowRootAccess` (or ARM `netappAllowRootAccess`) is explicitly enabled.
-The recommended demo deliberately enables root access only for its private
-client's `/32` export because Run Command executes as root.
-Root squashing and filesystem permissions must be considered when mounting and
-initializing workloads.
-
-The Oracle example now uses private NICs, Linux/SSH for Oracle and Windows Server
-2022 for the application VM. It does not create public IP addresses, Internet-wide
-RDP/SSH rules or a Bastion host. Provide private administrative connectivity
-separately. Existing deployments are not automatically migrated.
-
-## Local checks
-
-```powershell
-# Dependency-free regression suite:
-pwsh -NoProfile -File ./tests/Run-Tests.ps1
-
-# Complete CI-equivalent checks, with explicit one-time tool downloads:
-pwsh -NoProfile -File ./tests/Invoke-QualityChecks.ps1 -InstallTools
-
-# Subsequent runs reuse the tools cache and require no network/Azure login:
-pwsh -NoProfile -File ./tests/Invoke-QualityChecks.ps1
-```
-
-The dependency-free checks cover PowerShell syntax, input boundaries, status
-timeouts, offline previews, repeat runs, ARM validation handling and Oracle
-orchestration using Azure command doubles. Additional failure cases cover partial
-ANF deployments and resumption, canceled/failed provisioning, subnet/delegation/
-export drift, incorrect subscription contexts and missing image/What-If responses.
-Blank resource states and unresolved image versions now fail explicitly.
-Demo orchestration checks include private client/NAT configuration, ownership
-and inventory guards, snapshot sequencing and guest-error propagation. On
-non-Windows systems the shared runner also exercises the Linux guest script
-using local mount/agent fixtures and real temporary example files. This is not
-a real NFS mount or Azure integration test.
-
-The full quality runner adds checks against **real, imported Az module metadata**:
-command and parameter names, required parameters, supported parameter sets,
-literal hashtable splats (including appended keys and helper forwarding) and
-pipeline input. Unknown commands, unresolved splats and unsupported dynamic
-commands fail rather than being silently skipped. Built-in valid and invalid
-fixtures verify the checker itself. No Azure command is invoked by this check.
-It is a conservative static check, not a PowerShell runtime binder: argument
-types/values, actual pipeline object types and Azure responses are not verified.
-
-Tools are downloaded only with `-InstallTools`, from fixed official GitHub release
-assets, and checked against SHA-256 hashes in `tests/QualityTools.psd1`. The Az
-release archive is about 139 MB; only the six needed modules are installed.
-PSScriptAnalyzer is pinned to 1.25.0. Modules are extracted into an isolated cache
-under the OS temporary directory, not the repository or global module locations.
-Use `-ToolsPath '/path/outside/the/repository'` consistently on both commands to
-choose a persistent cache. The installer needs PowerShell 7.4+, `tar` (included
-on the GitHub-hosted runners and modern Windows) and Internet access to GitHub
-releases. It does not silently fall back to another module version or source.
-Treat the local tools cache as trusted executable code; it is not re-downloaded
-or re-hashed on every run. Do not share a writable cache with untrusted users.
-
-Regression tests and contract checks run in fresh `pwsh -NoProfile` processes,
-so Azure command doubles cannot mask real metadata. The parent runner performs
-linting. CI uses the same entry point on Windows and Linux. Exact Az/analyzer
-versions and downloaded bytes are pinned, while OS images and PowerShell patch
-versions remain environment-managed; the runner reports the PowerShell version.
-
-These checks do not create Azure resources and do not replace a live integration
-test or workload validation. The verified offline baseline is not a claim that
-the scripts deploy successfully in Azure.
-
-The ARM template uses stable `Microsoft.NetApp` API `2026-08-01` and
-`Microsoft.Network` API `2026-03-01`, verified in the published
-[Azure REST API specifications](https://github.com/Azure/azure-rest-api-specs).
-Validate availability in the intended Azure cloud before deploying.
-
-## Automated quality checks
-
-The [Quality checks workflow](.github/workflows/quality.yml) runs on every pull
-request, on pushes to `master`, and manually through the Actions tab once the
-workflow is on the default branch. Each run uses both Ubuntu 24.04 and Windows
-Server 2025, with PowerShell 7.4+ supplied by the GitHub-hosted runner.
-
-Both platforms run `tests/Invoke-QualityChecks.ps1 -InstallTools`, including JSON
-parsing and ARM sample parameter checks (required values, types, allowed values,
-size/length constraints,
-CIDRs and capacity), Az 16.5.0 command-contract checks and analysis of deployment
-scripts and quality tooling with **PSScriptAnalyzer 1.25.0**. Analyzer warnings or
-errors fail the check. Only `tests/Run-Tests.ps1`, containing the Azure command
-doubles, is excluded from linting; all PowerShell files are parsed by the test suite.
-
-Checkout is pinned to a commit and the analyzer to an exact version. Runner
-images and their bundled PowerShell patches receive GitHub updates. The workflow
-has read-only repository permissions, does not persist Git credentials, and
-requires no secrets, Azure login or deployments. Tool installation uses
-checksum-pinned GitHub release downloads, not PowerShell Gallery. GitHub Actions
-usage is subject to the repository's plan and billing settings; no Azure
-resources or costs are created.
-
-Failures appear in the pull request checks and Actions logs. To make passing
-checks mandatory before merging, configure a repository ruleset or branch
-protection rule separately; this workflow does not change repository rules.
-Local template checks do not replace Azure ARM validation or integration tests.
-
-## Cost and cleanup
-
-The two-region example allocates two capacity pools; the Oracle example also
-allocates VMs and disks. Stopped VMs do not eliminate storage/ANF charges.
-After reviewing the **exact** resource groups and their contents, delete dedicated
-PoC groups explicitly, for example:
+For these infrastructure-only scenarios, review each exact group's contents
+before manually removing dedicated groups; do not use the single-region demo's
+Cleanup action on them:
 
 ```powershell
 Get-AzResource -ResourceGroupName 'anf-poc-west'
 Remove-AzResourceGroup -Name 'anf-poc-west' -WhatIf
-# Remove -WhatIf only after confirming that the entire group can be deleted.
+# Remove -WhatIf only after confirming the entire group can be deleted.
 ```
+
+## Azure preflight validation
+
+[`Test-AzureDeployment.ps1`](Test-AzureDeployment.ps1) checks the **ARM JSON
+scenario**, not the recommended client/NAT demo or Oracle network/VM deployment.
+Edit the ARM parameter file and use an existing dedicated group with registered
+providers and the intended deployment identity, not merely a Reader account:
+
+```powershell
+$validation = @{
+    SubscriptionId = '<subscription-guid>'
+    ResourceGroup = 'existing-anf-test-group'; Location = 'westeurope'
+}
+./Test-AzureDeployment.ps1 @validation -WhatIf
+$result = ./Test-AzureDeployment.ps1 @validation
+$result | Select-Object SubscriptionId, ResourceGroup, Location, ValidationStatus
+$result.ResourceCapabilities | Format-Table
+$result.WhatIfResult
+# Optional Oracle/application image and purchase-plan checks:
+$result = ./Test-AzureDeployment.ps1 @validation -CheckOracleImages
+$result.Images | Format-Table
+```
+
+Checks subscription enabled state, group existence, providers, advertised
+API/region support, baseline resource-group grants, ARM validation and incremental
+What-If. Grants are paginated with `NotActions` applied per grant. Requires
+subscription/provider/location/resource reads,
+`Microsoft.Authorization/permissions/read` and deployment-related validation/
+What-If write permissions, resource read/write and subnet join. Grants only on
+individual resources may not satisfy this conservative baseline.
+
+Optional image checks use the Oracle image overrides and `-AppImageSku`, return
+resolved versions, and never accept terms. Without them, no Compute module/
+provider or image queries are needed. `-TemplateFile`/`-TemplateParameterFile`
+select local variants; this is not a general ARM validator: nested deployments/
+resources, other resource types, computed APIs/unsupported location expressions
+are rejected. Context is selected only for the process with autosave disabled.
+No registration, creation, deletion, role assignment or report file is performed.
+
+**Success is not a deployment guarantee:** deny assignments, RBAC conditions,
+Policy, locks, quotas, live capacity, routing, mounts, VM sizes, licensing and
+database operation are not independently validated. Inspect full What-If
+diagnostics, including incomplete/ignored changes. This is manual, not part of
+credential-free CI.
+
+## Offline quality checks
+
+```powershell
+# Dependency-free PowerShell regression suite:
+pwsh -NoProfile -File ./tests/Run-Tests.ps1
+# Complete local/CI checks; explicitly download tools once:
+pwsh -NoProfile -File ./tests/Invoke-QualityChecks.ps1 -InstallTools
+# Reuse cache without network or Azure login:
+pwsh -NoProfile -File ./tests/Invoke-QualityChecks.ps1
+```
+
+Regression checks cover syntax, JSON/ARM samples, input boundaries, failures,
+repeat runs, orchestration, snapshot ordering and cleanup guards using Azure
+command doubles. Non-Windows runs also exercise the Linux guest script with
+local mount/agent fixtures and real temporary files, **not actual NFS**.
+
+The full runner imports real **Az 16.5.0** component metadata to check command/
+parameter names, mandatory parameters, parameter sets, literal splats/appended
+keys/helper forwarding and pipeline binding metadata. Unknown commands and
+unresolved/unsupported constructs fail; valid/invalid fixtures check the checker.
+This does not validate runtime argument values/types, actual pipeline objects,
+Azure responses or deployment success. Fresh `pwsh -NoProfile` subprocesses
+isolate mocks from real modules.
+
+[`QualityTools.psd1`](tests/QualityTools.psd1) pins six Az components and
+**PSScriptAnalyzer 1.25.0**. `-InstallTools` downloads official GitHub release
+assets with SHA-256 verification (Az archive about 139 MB), not PowerShell Gallery.
+Requires `tar`, PowerShell 7.4+ and access to GitHub releases. The isolated cache
+defaults to the OS temporary directory; use `-ToolsPath '/path/outside/the/repo'`
+consistently for a persistent cache. Cached executable code is trusted, not
+rehashed each run; never share a writable cache with untrusted users.
+No global modules are installed or fallback versions/sources selected.
+Record deployment modules with `Get-Module Az.* -ListAvailable`.
+
+The [quality workflow](.github/workflows/quality.yml) runs the same entry point
+on PRs, pushes to `master` and manual dispatch, on Ubuntu 24.04/Windows Server
+2025. All PowerShell scripts are parsed; analyzer warnings/errors fail, with
+only the mock-heavy `tests/Run-Tests.ps1` excluded from linting. Checkout is
+commit-pinned; OS images and PowerShell patches remain runner-managed.
+Permissions are read-only, credentials are not persisted, and no Azure secrets/
+login/deployments are used. GitHub Actions plan/billing limits still apply.
+Mandatory passing checks require separately configured branch protection/rulesets.
 
 ## References
 
-- [ANF resource provider registration](https://learn.microsoft.com/azure/azure-netapp-files/azure-netapp-files-register)
-- [ANF resource limits](https://learn.microsoft.com/azure/azure-netapp-files/azure-netapp-files-resource-limits)
-- [ANF network guidelines](https://learn.microsoft.com/azure/azure-netapp-files/azure-netapp-files-network-topologies)
+- [ANF provider registration](https://learn.microsoft.com/azure/azure-netapp-files/azure-netapp-files-register)
+- [ANF limits](https://learn.microsoft.com/azure/azure-netapp-files/azure-netapp-files-resource-limits)
+- [ANF networking](https://learn.microsoft.com/azure/azure-netapp-files/azure-netapp-files-network-topologies)
 - [ARM What-If](https://learn.microsoft.com/azure/azure-resource-manager/templates/deploy-what-if)
 
 Originally authored by Christian Twilfer, 2020-2021.
