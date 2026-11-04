@@ -32,6 +32,19 @@ accepted in the subscription. The script checks acceptance and applies the plan
 to the VM, but never accepts terms on your behalf. VM security type is explicitly
 `Standard` to retain compatibility with the original generation-1 Oracle image.
 
+You can check image availability and accepted purchase-plan terms without
+starting the infrastructure deployment:
+
+```powershell
+./Test-AzureDeployment.ps1 -SubscriptionId '<subscription-guid>' `
+    -ResourceGroup 'existing-anf-test-group' -Location 'westeurope' -CheckOracleImages
+```
+
+This runs the single-region **ANF ARM** preflight plus checks of the Oracle and
+application images. It does not preview the Oracle VM/network deployment,
+check VM size availability or validate a database. See the
+[preflight requirements and limitations](../README.md#azure-preflight-validation).
+
 Both VMs have **private NICs only**. Default NSG rules permit virtual-network
 traffic, including peered networks; no Internet-wide SSH/RDP rule is added.
 Provide private administrative connectivity and any required outbound access

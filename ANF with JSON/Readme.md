@@ -60,3 +60,10 @@ Azure preview before updating an existing environment.
 
 Outputs: `accountId`, `poolId`, `volumeId` and `subnetId`. Provisioning errors are
 reported as failures; no automatic cleanup is performed.
+
+For subscription state, effective resource-group permissions and advertised
+API/region checks **before** ARM validation and What-If, use
+[`Test-AzureDeployment.ps1`](../Test-AzureDeployment.ps1). See the
+[Azure preflight instructions](../README.md#azure-preflight-validation).
+It requires an existing test resource group and never creates resources or
+registers providers.

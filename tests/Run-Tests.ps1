@@ -108,10 +108,11 @@ Test-Case 'State polling handles success, failure, missing status and timeout' {
         throw 'Polling slept beyond the configured timeout instead of limiting the last interval.'
     }
 }
-Test-Case 'All three WhatIf entry points run offline without Azure modules or authentication' {
+Test-Case 'Deployment and preflight WhatIf entry points run offline without Azure modules or authentication' {
     & "$root/ANF-PoC-Deployment.ps1" @twoRegions -WhatIf
     & "$root/ANF with JSON/ANF_JSON_Deployment.ps1" @arm -WhatIf
     & "$root/Oracle on Azure/OracleDB-ANF-PoC-Deployment.ps1" @oracle -WhatIf
+    & "$root/Test-AzureDeployment.ps1" @arm -CheckOracleImages -WhatIf
 }
 Test-Case 'Invalid Oracle network/key inputs fail before Azure access' {
     $invalid = $oracle.Clone()
@@ -196,6 +197,10 @@ $global:AnfTestState = @{
     Groups = @{}; Vnets = @{}; Accounts = @{}; Pools = @{}; Volumes = @{}; Snapshots = @{}
     Vms = @{}; Nics = @{}; Nsgs = @{}; TermsAccepted = $true; OracleOS = 'Linux'; Authenticated = $true
     Writes = 0; Imports = 0; ProviderState = 'Registered'; Registrations = 0; ValidationErrors = @()
+    SubscriptionState = 'Enabled'; Region = 'westeurope'; ApiAvailable = $true; RegionAvailable = $true
+    PermissionPages = @(@{ value = @(@{ actions = @('*'); notActions = @() }) })
+    PermissionReads = 0; PermissionHttpStatus = 200
+    PreviewStatus = 'Succeeded'; PreviewError = $null; PreviewCalls = 0; ValidationCalls = 0; ImageReads = 0
 }
 function Get-Module { param($Name, [switch] $ListAvailable) [pscustomobject]@{ Name = $Name } }
 function Import-Module { [CmdletBinding()] param($Name) $global:AnfTestState.Imports++ }
@@ -210,14 +215,54 @@ function Set-AzContext {
 }
 function Get-AzResourceProvider {
     [CmdletBinding()] param($ProviderNamespace)
-    [pscustomobject]@{ RegistrationState = $global:AnfTestState.ProviderState }
+    $typeNames = if ($ProviderNamespace -eq 'Microsoft.NetApp') {
+        @('netAppAccounts', 'netAppAccounts/capacityPools', 'netAppAccounts/capacityPools/volumes')
+    } else { @('virtualNetworks') }
+    [pscustomobject]@{
+        RegistrationState = $global:AnfTestState.ProviderState
+        ResourceTypes = @($typeNames | ForEach-Object {
+            [pscustomobject]@{
+                ResourceTypeName = $_
+                ApiVersions = $(if ($global:AnfTestState.ApiAvailable) { @('2026-08-01', '2026-03-01') } else { @('2020-06-01') })
+                Locations = $(if ($global:AnfTestState.RegionAvailable) { @('West Europe') } else { @('North Europe') })
+            }
+        })
+    }
 }
 function Register-AzResourceProvider {
     [CmdletBinding()] param($ProviderNamespace)
     $global:AnfTestState.Registrations++
     $global:AnfTestState.ProviderState = 'Registered'
 }
-function Get-AzResourceGroup { [CmdletBinding()] param() $global:AnfTestState.Groups.Values }
+function Get-AzResourceGroup {
+    [CmdletBinding()] param($Name)
+    if ($Name) { return $global:AnfTestState.Groups[$Name] }
+    $global:AnfTestState.Groups.Values
+}
+function Get-AzSubscription {
+    [CmdletBinding()] param($SubscriptionId)
+    [pscustomobject]@{ Id = $SubscriptionId; State = $global:AnfTestState.SubscriptionState }
+}
+function Get-AzLocation {
+    [CmdletBinding()] param()
+    [pscustomobject]@{ Location = $global:AnfTestState.Region; DisplayName = 'West Europe' }
+}
+function Invoke-AzRestMethod {
+    [CmdletBinding()] param($Method, $Path)
+    Assert-Equal $Method 'GET'
+    if ($Path -notlike "/subscriptions/$($arm.SubscriptionId)/resourceGroups/$($arm.ResourceGroup)/providers/Microsoft.Authorization/permissions?*") {
+        throw "Unexpected REST path: $Path"
+    }
+    $index = $global:AnfTestState.PermissionReads
+    $global:AnfTestState.PermissionReads++
+    if ($index -ge $global:AnfTestState.PermissionPages.Count) {
+        throw 'Permission page requested more than once or beyond the available pages.'
+    }
+    [pscustomobject]@{
+        StatusCode = $global:AnfTestState.PermissionHttpStatus
+        Content = $global:AnfTestState.PermissionPages[$index] | ConvertTo-Json -Depth 10 -Compress
+    }
+}
 function New-AzResourceGroup {
     [CmdletBinding()] param($Name, $Location)
     $global:AnfTestState.Writes++
@@ -316,11 +361,14 @@ function Get-AzNetAppFilesSnapshot {
 function Test-AzResourceGroupDeployment {
     [CmdletBinding()] param($ResourceGroupName, $TemplateFile, $TemplateParameterObject)
     Assert-Equal $TemplateParameterObject.location $arm.Location
+    $global:AnfTestState.ValidationCalls++
     $global:AnfTestState.ValidationErrors
 }
 function Get-AzResourceGroupDeploymentWhatIfResult {
-    [CmdletBinding()] param($ResourceGroupName, $TemplateFile, $TemplateParameterObject)
-    'ARM preview'
+    [CmdletBinding()] param($ResourceGroupName, $TemplateFile, $TemplateParameterObject, $Mode)
+    if ($Mode) { Assert-Equal $Mode 'Incremental' }
+    $global:AnfTestState.PreviewCalls++
+    [pscustomobject]@{ Status = $global:AnfTestState.PreviewStatus; Error = $global:AnfTestState.PreviewError; Changes = @() }
 }
 function New-AzResourceGroupDeployment {
     [CmdletBinding()] param($ResourceGroupName, $TemplateFile, $TemplateParameterObject, $Name, $Mode)
@@ -330,6 +378,7 @@ function New-AzResourceGroupDeployment {
 }
 function Get-AzVMImage {
     [CmdletBinding()] param($Location, $PublisherName, $Offer, $Skus, $Version)
+    $global:AnfTestState.ImageReads++
     if ($PublisherName -eq 'MicrosoftWindowsServer') {
         return [pscustomobject]@{ OSDiskImage = @{ OperatingSystem = 'Windows' }; Version = '1.0.0' }
     }
@@ -479,7 +528,7 @@ Test-Case 'ARM deployment is validated and uses an explicit incremental deployme
 }
 Test-Case 'ARM preview is read-only and refuses to create a missing group or register providers' {
     $writes = $global:AnfTestState.Writes
-    Assert-Equal (& "$root/ANF with JSON/ANF_JSON_Deployment.ps1" @arm -Preview) 'ARM preview'
+    Assert-Equal (& "$root/ANF with JSON/ANF_JSON_Deployment.ps1" @arm -Preview).Status 'Succeeded'
     Assert-Equal $global:AnfTestState.Writes $writes
     $missing = $arm.Clone(); $missing.ResourceGroup = 'missing'
     Assert-Throws { & "$root/ANF with JSON/ANF_JSON_Deployment.ps1" @missing -Preview } 'existing resource group'
@@ -547,6 +596,163 @@ Test-Case 'Oracle refuses existing VMs/NICs/NSGs instead of silently adopting in
     $writes = $global:AnfTestState.Writes
     Assert-Throws { & "$root/Oracle on Azure/OracleDB-ANF-PoC-Deployment.ps1" @oracle } 'already exist'
     Assert-Equal $global:AnfTestState.Writes $writes
+}
+
+Test-Case 'Azure preflight WhatIf is entirely offline even with image checks' {
+    $imports = $global:AnfTestState.Imports
+    $reads = $global:AnfTestState.PermissionReads
+    $images = $global:AnfTestState.ImageReads
+    & "$root/Test-AzureDeployment.ps1" @arm -CheckOracleImages -WhatIf
+    Assert-Equal $global:AnfTestState.Imports $imports
+    Assert-Equal $global:AnfTestState.PermissionReads $reads
+    Assert-Equal $global:AnfTestState.ImageReads $images
+}
+Test-Case 'Azure preflight checks actual prerequisites and returns the ARM preview without writes' {
+    $global:AnfTestState.PermissionReads = 0
+    $writes = $global:AnfTestState.Writes
+    $registrations = $global:AnfTestState.Registrations
+    $validations = $global:AnfTestState.ValidationCalls
+    $previews = $global:AnfTestState.PreviewCalls
+    $images = $global:AnfTestState.ImageReads
+    $result = & "$root/Test-AzureDeployment.ps1" @arm -WarningAction SilentlyContinue
+    Assert-Equal $result.ValidationStatus 'Succeeded'
+    Assert-Equal $result.ResourceCapabilities.Count 4
+    Assert-Equal $result.PermissionActionsChecked.Count 14
+    Assert-Equal $result.OracleImagesChecked $false
+    Assert-Equal $result.Images.Count 0
+    Assert-Equal $global:AnfTestState.ImageReads $images
+    Assert-Equal $result.WhatIfResult.Status 'Succeeded'
+    Assert-Equal $global:AnfTestState.ValidationCalls ($validations + 1)
+    Assert-Equal $global:AnfTestState.PreviewCalls ($previews + 1)
+    Assert-Equal $global:AnfTestState.Writes $writes
+    Assert-Equal $global:AnfTestState.Registrations $registrations
+}
+Test-Case 'Azure preflight reports resolved Oracle and application images without accepting terms' {
+    $global:AnfTestState.PermissionReads = 0
+    $writes = $global:AnfTestState.Writes
+    $result = & "$root/Test-AzureDeployment.ps1" @arm -CheckOracleImages -WarningAction SilentlyContinue
+    Assert-Equal $result.OracleImagesChecked $true
+    Assert-Equal $result.Images.Count 2
+    Assert-Equal $result.Images[0].Urn 'oracle:oracle-database-19-3:oracle-database-19-0904:1.0.0'
+    Assert-Equal $global:AnfTestState.Writes $writes
+}
+Test-Case 'Azure preflight refuses disabled subscriptions, missing groups, unknown regions and unregistered providers' {
+    $writes = $global:AnfTestState.Writes
+    $global:AnfTestState.SubscriptionState = 'Disabled'
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'not enabled'
+    $global:AnfTestState.SubscriptionState = 'Enabled'
+    $missing = $arm.Clone(); $missing.ResourceGroup = 'missing'
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @missing } 'existing resource group'
+    $global:AnfTestState.Region = 'northeurope'
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'not available'
+    $global:AnfTestState.Region = 'westeurope'
+    $global:AnfTestState.ProviderState = 'NotRegistered'
+    $registrations = $global:AnfTestState.Registrations
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'not registered'
+    Assert-Equal $global:AnfTestState.Registrations $registrations
+    $global:AnfTestState.ProviderState = 'Registered'
+    Assert-Equal $global:AnfTestState.Writes $writes
+}
+Test-Case 'Azure preflight refuses unsupported API versions and unavailable resource regions' {
+    $global:AnfTestState.ApiAvailable = $false
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'not advertised'
+    $global:AnfTestState.ApiAvailable = $true
+    $global:AnfTestState.RegionAvailable = $false
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'Availability could not be confirmed'
+    $global:AnfTestState.RegionAvailable = $true
+}
+Test-Case 'Azure permission exclusions are scoped per grant and paginated grants are additive' {
+    $global:AnfTestState.PermissionReads = 0
+    $excluded = 'Microsoft.NetApp/netAppAccounts/capacityPools/volumes/write'
+    $global:AnfTestState.PermissionPages = @(@{ value = @(@{ actions = @('*'); notActions = @($excluded) }) })
+    $previews = $global:AnfTestState.PreviewCalls
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } "Required action '$excluded'"
+    Assert-Equal $global:AnfTestState.PreviewCalls $previews
+    $global:AnfTestState.PermissionReads = 0
+    $global:AnfTestState.PermissionPages[0].nextLink = "https://management.azure.com/subscriptions/$($arm.SubscriptionId)/resourceGroups/$($arm.ResourceGroup)/providers/Microsoft.Authorization/permissions?api-version=2022-04-01&skiptoken=next"
+    $global:AnfTestState.PermissionPages += @{ value = @(@{ actions = @($excluded); notActions = @() }) }
+    & "$root/Test-AzureDeployment.ps1" @arm -WarningAction SilentlyContinue | Out-Null
+    Assert-Equal $global:AnfTestState.PermissionReads 2
+    $global:AnfTestState.PermissionPages = @(@{ value = @(@{ actions = @('*'); notActions = @() }) })
+}
+Test-Case 'Azure permissions HTTP errors, empty grants and malformed replies fail explicitly' {
+    $global:AnfTestState.PermissionReads = 0
+    $global:AnfTestState.PermissionHttpStatus = 403
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'HTTP 403'
+    $global:AnfTestState.PermissionHttpStatus = 200
+    $global:AnfTestState.PermissionReads = 0
+    $global:AnfTestState.PermissionPages = @(@{ value = @() })
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'not granted'
+    $global:AnfTestState.PermissionReads = 0
+    $global:AnfTestState.PermissionPages = @(@{ unexpected = 'response' })
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'value collection'
+    $global:AnfTestState.PermissionPages = @(@{ value = @(@{ actions = @('*'); notActions = @() }) })
+}
+Test-Case 'Azure preflight stops on ARM validation errors and failed WhatIf results' {
+    $global:AnfTestState.PermissionReads = 0
+    $previews = $global:AnfTestState.PreviewCalls
+    $global:AnfTestState.ValidationErrors = @([pscustomobject]@{ Message = 'Azure policy rejected template' })
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'ARM validation failed'
+    Assert-Equal $global:AnfTestState.PreviewCalls $previews
+    $global:AnfTestState.ValidationErrors = @()
+    $global:AnfTestState.PermissionReads = 0
+    $global:AnfTestState.PreviewStatus = 'Failed'
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'ARM What-If did not succeed'
+    $global:AnfTestState.PreviewStatus = 'Succeeded'
+    $global:AnfTestState.PermissionReads = 0
+    $global:AnfTestState.PreviewError = @{ code = 'PolicyViolation' }
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'ARM What-If did not succeed'
+    $global:AnfTestState.PreviewError = $null
+}
+Test-Case 'Azure preflight rejects missing Marketplace terms without altering agreements' {
+    $global:AnfTestState.PermissionReads = 0
+    $writes = $global:AnfTestState.Writes
+    $global:AnfTestState.TermsAccepted = $false
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm -CheckOracleImages } 'Accept the Marketplace terms'
+    Assert-Equal $global:AnfTestState.Writes $writes
+    $global:AnfTestState.TermsAccepted = $true
+}
+Test-Case 'Azure preflight rejects unsupported template shapes before contacting Azure' {
+    $file = New-TemporaryFile
+    try {
+        $template = Get-Content "$root/ANF with JSON/azuredeploy.json" -Raw | ConvertFrom-Json -AsHashtable
+        $template.resources[0].apiVersion = "[variables('netappApiVersion')]"
+        $template | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $file.FullName
+        $imports = $global:AnfTestState.Imports
+        Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm -TemplateFile $file.FullName -WhatIf } 'Preflight supports only'
+        Assert-Equal $global:AnfTestState.Imports $imports
+    } finally {
+        Remove-Item -LiteralPath $file.FullName
+    }
+}
+Test-Case 'Azure preflight validates login without changing registrations or resources' {
+    $global:AnfTestState.Authenticated = $false
+    $writes = $global:AnfTestState.Writes
+    $registrations = $global:AnfTestState.Registrations
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'No Azure login found'
+    Assert-Equal $global:AnfTestState.Writes $writes
+    Assert-Equal $global:AnfTestState.Registrations $registrations
+    $global:AnfTestState.Authenticated = $true
+}
+Test-Case 'Azure preflight refuses permissions pagination outside the requested scope' {
+    $global:AnfTestState.PermissionReads = 0
+    $global:AnfTestState.PermissionPages = @(@{
+        value = @(@{ actions = @('*'); notActions = @() })
+        nextLink = 'https://management.azure.com/subscriptions/unexpected/providers/Microsoft.Authorization/permissions?api-version=2022-04-01'
+    })
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'unexpected scope'
+    Assert-Equal $global:AnfTestState.PermissionReads 1
+    $global:AnfTestState.PermissionPages = @(@{ value = @(@{ actions = @('*'); notActions = @() }) })
+}
+Test-Case 'Azure preflight detects cyclic permissions pagination without issuing another request' {
+    $global:AnfTestState.PermissionReads = 0
+    $global:AnfTestState.PermissionPages = @(@{
+        value = @(@{ actions = @('*'); notActions = @() })
+        nextLink = "/subscriptions/$($arm.SubscriptionId)/resourceGroups/$($arm.ResourceGroup)/providers/Microsoft.Authorization/permissions?api-version=2022-04-01"
+    })
+    Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'repeated link'
+    Assert-Equal $global:AnfTestState.PermissionReads 1
+    $global:AnfTestState.PermissionPages = @(@{ value = @(@{ actions = @('*'); notActions = @() }) })
 }
 
 Write-Output "$script:passed passed; $script:failures failed."

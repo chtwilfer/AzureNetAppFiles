@@ -68,6 +68,71 @@ function Import-AnfModule {
     }
 }
 
+function Get-AnfTemplateInput {
+    param([string] $TemplateFile, [string] $TemplateParameterFile, [string] $Location)
+
+    $templatePath = (Resolve-Path -LiteralPath $TemplateFile -ErrorAction Stop).Path
+    $parameterPath = (Resolve-Path -LiteralPath $TemplateParameterFile -ErrorAction Stop).Path
+    $template = Get-Content -LiteralPath $templatePath -Raw | ConvertFrom-Json -AsHashtable
+    $document = Get-Content -LiteralPath $parameterPath -Raw | ConvertFrom-Json -AsHashtable
+    $parameters = @{}
+    foreach ($name in $document.parameters.Keys) {
+        if (-not $template.parameters.ContainsKey($name)) {
+            throw "Unknown template parameter '$name'."
+        }
+        if (-not $document.parameters[$name].ContainsKey('value')) {
+            throw "Parameter '$name' must contain a value. Key Vault references are not supported by this wrapper."
+        }
+        $parameters[$name] = $document.parameters[$name].value
+    }
+    # The explicit script location always wins over a parameter-file location.
+    $parameters.location = $Location
+    foreach ($name in $template.parameters.Keys) {
+        if (-not $parameters.ContainsKey($name)) {
+            if (-not $template.parameters[$name].ContainsKey('defaultValue')) {
+                throw "Missing required template parameter '$name'."
+            }
+            $parameters[$name] = $template.parameters[$name].defaultValue
+        }
+    }
+    Assert-AnfNetwork -Network $parameters.netappVirtualNetworkAddressPrefix `
+        -Subnet $parameters.netappVirtualNetworkSubnetAddressPrefix -AllowedClients $parameters.netappAllowedClients
+    Assert-AnfCapacity -PoolSizeBytes $parameters.netappPoolSize -VolumeSizeBytes $parameters.netappVolumeSize
+    [pscustomobject]@{
+        TemplateFile = $templatePath; Template = $template; Parameters = $parameters
+    }
+}
+
+function Assert-AnfArmValidation {
+    param([Parameter(Mandatory)][hashtable] $Deployment)
+
+    $validationErrors = @(Test-AzResourceGroupDeployment @Deployment)
+    if ($validationErrors.Count -gt 0) {
+        throw "ARM validation failed: $($validationErrors | ConvertTo-Json -Depth 10 -Compress)"
+    }
+}
+
+function Get-AnfVmImage {
+    param(
+        [string] $Location, [string] $Publisher, [string] $Offer, [string] $Sku,
+        [string] $Version = 'latest', [ValidateSet('Windows', 'Linux')][string] $OperatingSystem
+    )
+
+    $image = Get-AzVMImage -Location $Location -PublisherName $Publisher -Offer $Offer `
+        -Skus $Sku -Version $Version -ErrorAction Stop
+    if (-not $image -or $image.OSDiskImage.OperatingSystem -ne $OperatingSystem) {
+        throw "Image '$Publisher/$Offer/$Sku/$Version' must exist in the region and use $OperatingSystem."
+    }
+    $plan = $image.PurchasePlan
+    if ($plan) {
+        $terms = Get-AzMarketplaceTerms -Publisher $plan.Publisher -Product $plan.Product -Name $plan.Name -ErrorAction Stop
+        if (-not $terms.Accepted) {
+            throw "Accept the Marketplace terms for '$($plan.Publisher)/$($plan.Product)/$($plan.Name)' explicitly before deploying."
+        }
+    }
+    $image
+}
+
 function Wait-AnfState {
     param(
         [Parameter(Mandatory)][scriptblock] $Read,

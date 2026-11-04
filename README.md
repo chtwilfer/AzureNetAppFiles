@@ -9,6 +9,7 @@ recovery solution.
 | [`ANF-PoC-Deployment.ps1`](ANF-PoC-Deployment.ps1) | Two independent regions, each with a resource group, delegated VNet/subnet, ANF account, pool and NFS volume; optional snapshots |
 | [`ANF with JSON`](ANF%20with%20JSON/Readme.md) | One ANF environment using an ARM JSON template |
 | [`Oracle on Azure`](Oracle%20on%20Azure/Readme.md) | Windows application VM, Linux Oracle VM, two ANF volumes and VNet peerings |
+| [`Test-AzureDeployment.ps1`](Test-AzureDeployment.ps1) | Read-only Azure prerequisite checks, ARM validation and What-If for the single-region ANF template; optional Oracle/application image checks |
 
 ## Requirements
 
@@ -108,6 +109,89 @@ implemented**; the two volumes remain independent.
   durations are governed by Az itself, not this polling timeout.
 - Deployments are not transactional. A failure can leave billable resources.
   No automatic rollback or deletion is performed.
+
+## Azure preflight validation
+
+[`Test-AzureDeployment.ps1`](Test-AzureDeployment.ps1) checks the single-region
+ANF ARM scenario against Azure **without deploying it**. First edit the
+[sample parameters](ANF%20with%20JSON/azuredeploy.parameters.json) for your
+environment. Authenticate explicitly and use a pre-existing, dedicated test
+resource group:
+
+```powershell
+Connect-AzAccount
+$validation = @{
+    SubscriptionId = '<subscription-guid>'
+    ResourceGroup = 'anf-validation-test'
+    Location = 'westeurope'
+}
+
+# Local parameter checks and operation summary only; no Azure connection:
+./Test-AzureDeployment.ps1 @validation -WhatIf
+
+# Real Azure queries, ARM validation and incremental What-If:
+$result = ./Test-AzureDeployment.ps1 @validation
+$result | Select-Object SubscriptionId, ResourceGroup, Location, ValidationStatus
+$result.ResourceCapabilities | Format-Table
+$result.WhatIfResult
+```
+
+The script requires PowerShell 7.4+, `Az.Accounts` and `Az.Resources`. It checks:
+
+- The selected subscription is enabled and the resource group exists.
+- `Microsoft.NetApp` and `Microsoft.Network` are already registered.
+- The target region and literal stable API versions are advertised by the
+  subscription for each resource type in the template.
+- Effective control-plane permissions at the resource-group scope allow the
+  baseline deployment/validation/What-If, resource read/write and subnet join
+  actions. Permission pages are combined with `NotActions` applied per grant.
+- Azure accepts the template validation and returns a successful incremental
+  ARM What-If. The complete preview is returned for inspection, not applied.
+
+Use the **identity intended for deployment**, not merely a Reader account.
+Validation/What-If do not change infrastructure but require deployment-related
+write permissions. The identity also needs subscription/provider/location reads,
+`Microsoft.Authorization/permissions/read` at the resource group, and resource
+read access. These checks do not assign roles or activate PIM access.
+Resource-group-level grants are the conservative baseline: permissions granted
+only on individual existing resources may not satisfy it.
+
+To check the Oracle scenario's Linux image, Windows application image and any
+Marketplace purchase-plan acceptance as well:
+
+```powershell
+# Also requires explicitly installed Az.Compute and Az.MarketplaceOrdering:
+$result = ./Test-AzureDeployment.ps1 @validation -CheckOracleImages
+$result.Images | Format-Table
+```
+
+Image defaults match the Oracle deployment script. Optional overrides are
+`-OracleImagePublisher`, `-OracleImageOffer`, `-OracleImageSku`,
+`-OracleImageVersion` and `-AppImageSku`. `latest` is resolved and the selected
+versions are included in the result. Marketplace terms are checked, **never
+accepted**. Without `-CheckOracleImages`, no Compute module/provider or image
+queries are required and the result explicitly marks image checks as not run.
+
+`-TemplateFile` and `-TemplateParameterFile` can select local variants of the
+repository's single-region ANF template; location is always supplied explicitly.
+This is not a general ARM validator: nested resources/deployments, other resource
+types, computed API versions and other location expressions are rejected before
+Azure access. No registration, resource-group creation, deployment, deletion,
+permission assignment or local report file is performed. The active Azure
+subscription context is selected for the current process with autosave disabled.
+
+**A successful preflight is not a deployment guarantee.** Effective grant checks
+do not independently evaluate deny assignments, RBAC conditions, Azure Policy,
+locks, quotas or live regional capacity. ARM may catch some of these, but What-If
+can also contain incomplete/ignored changes; inspect the full result and its
+diagnostics. The script does not check client routing, NFS mounts, VM sizes,
+Oracle licensing or database operation. Optional image checks do not validate
+the Oracle network/VM deployment. A later real deployment still requires separate
+authorization and may incur costs.
+
+The script is run manually, not by the credential-free GitHub Actions workflow.
+Offline regression tests simulate Azure responses; a real run requires your
+Azure login and target subscription/resource group.
 
 ## Network and access changes
 

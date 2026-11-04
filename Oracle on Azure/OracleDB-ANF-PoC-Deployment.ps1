@@ -67,23 +67,11 @@ Initialize-AnfContext -SubscriptionId $SubscriptionId -ProviderNamespace Microso
     -RegisterProviders:$RegisterProviders -TimeoutSeconds $TimeoutSeconds
 
 # Fail before resource creation if an image or its licensing prerequisites are unavailable.
-$oracleImage = Get-AzVMImage -Location $Location -PublisherName $OracleImagePublisher -Offer $OracleImageOffer `
-    -Skus $OracleImageSku -Version $OracleImageVersion -ErrorAction Stop
-if (-not $oracleImage -or $oracleImage.OSDiskImage.OperatingSystem -ne 'Linux') {
-    throw 'The selected Oracle Marketplace image must exist in the region and use Linux.'
-}
-$appImage = Get-AzVMImage -Location $Location -PublisherName MicrosoftWindowsServer -Offer WindowsServer `
-    -Skus $AppImageSku -Version latest -ErrorAction Stop
-if (-not $appImage -or $appImage.OSDiskImage.OperatingSystem -ne 'Windows') {
-    throw 'The selected application image must exist in the region and use Windows.'
-}
+$oracleImage = Get-AnfVmImage -Location $Location -Publisher $OracleImagePublisher -Offer $OracleImageOffer `
+    -Sku $OracleImageSku -Version $OracleImageVersion -OperatingSystem Linux
+$appImage = Get-AnfVmImage -Location $Location -Publisher MicrosoftWindowsServer -Offer WindowsServer `
+    -Sku $AppImageSku -OperatingSystem Windows
 $plan = $oracleImage.PurchasePlan
-if ($plan) {
-    $terms = Get-AzMarketplaceTerms -Publisher $plan.Publisher -Product $plan.Product -Name $plan.Name -ErrorAction Stop
-    if (-not $terms.Accepted) {
-        throw "Accept the Marketplace terms for '$($plan.Publisher)/$($plan.Product)/$($plan.Name)' explicitly before deploying."
-    }
-}
 
 Initialize-AnfResourceGroup -Name $ResourceGroup -Location $Location | Out-Null
 # Existing VMs/NICs/NSGs may have public access or unrelated settings. Never silently reuse them.
