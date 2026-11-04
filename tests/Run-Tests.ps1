@@ -100,6 +100,12 @@ Test-Case 'State polling handles success, failure, missing status and timeout' {
     Assert-Equal $result.ProvisioningState 'Succeeded'
     Assert-Throws { Wait-AnfState -Read { [pscustomobject]@{ ProvisioningState = 'Failed' } } } 'terminal state'
     Assert-Throws { Wait-AnfState -Read { [pscustomobject]@{} } } 'was not returned'
+    Assert-Throws { Wait-AnfState -Read { $null } } 'was not returned'
+    Assert-Throws { Wait-AnfState -Read { [pscustomobject]@{ ProvisioningState = '' } } } 'was not returned'
+    foreach ($state in @('Canceled', 'Cancelled', 'Deleting', 'Disconnected')) {
+        Assert-Throws { Wait-AnfState -Read { [pscustomobject]@{ ProvisioningState = $state } } } 'terminal state'
+    }
+    Assert-Throws { Wait-AnfState -Read { throw 'Azure transport failed' } } 'Azure transport failed'
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     Assert-Throws { Wait-AnfState -TimeoutSeconds 1 -IntervalSeconds 5 -Read {
         [pscustomobject]@{ ProvisioningState = 'Creating' }
@@ -201,6 +207,7 @@ $global:AnfTestState = @{
     PermissionPages = @(@{ value = @(@{ actions = @('*'); notActions = @() }) })
     PermissionReads = 0; PermissionHttpStatus = 200
     PreviewStatus = 'Succeeded'; PreviewError = $null; PreviewCalls = 0; ValidationCalls = 0; ImageReads = 0
+    FailVolumeName = ''; PreviewNull = $false; ImageVersion = '1.0.0'; DeploymentStatus = 'Succeeded'; ContextId = ''
 }
 function Get-Module { param($Name, [switch] $ListAvailable) [pscustomobject]@{ Name = $Name } }
 function Import-Module { [CmdletBinding()] param($Name) $global:AnfTestState.Imports++ }
@@ -211,6 +218,7 @@ function Get-AzContext {
 function Disable-AzContextAutosave { [CmdletBinding()] param($Scope) }
 function Set-AzContext {
     [CmdletBinding()] param($SubscriptionId, $Scope)
+    if ($global:AnfTestState.ContextId) { $SubscriptionId = $global:AnfTestState.ContextId }
     [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = $SubscriptionId } }
 }
 function Get-AzResourceProvider {
@@ -329,6 +337,7 @@ function New-AzNetAppFilesVolume {
     [CmdletBinding()]
     param($ResourceGroupName, $AccountName, $PoolName, $Name, $Location, $UsageThreshold, $SubnetId,
         $CreationToken, $ServiceLevel, $ProtocolType, $ExportPolicy)
+    if ($Name -eq $global:AnfTestState.FailVolumeName) { throw 'Simulated volume creation failure' }
     $global:AnfTestState.Writes++
     $global:AnfTestState.Volumes["$ResourceGroupName/$AccountName/$PoolName/$Name"] = [pscustomobject]@{
         Name = "$AccountName/$PoolName/$Name"; Location = $Location; UsageThreshold = $UsageThreshold
@@ -368,22 +377,23 @@ function Get-AzResourceGroupDeploymentWhatIfResult {
     [CmdletBinding()] param($ResourceGroupName, $TemplateFile, $TemplateParameterObject, $Mode)
     if ($Mode) { Assert-Equal $Mode 'Incremental' }
     $global:AnfTestState.PreviewCalls++
+    if ($global:AnfTestState.PreviewNull) { return }
     [pscustomobject]@{ Status = $global:AnfTestState.PreviewStatus; Error = $global:AnfTestState.PreviewError; Changes = @() }
 }
 function New-AzResourceGroupDeployment {
     [CmdletBinding()] param($ResourceGroupName, $TemplateFile, $TemplateParameterObject, $Name, $Mode)
     Assert-Equal $Mode 'Incremental'
     $global:AnfTestState.Writes++
-    [pscustomobject]@{ ProvisioningState = 'Succeeded' }
+    [pscustomobject]@{ ProvisioningState = $global:AnfTestState.DeploymentStatus }
 }
 function Get-AzVMImage {
     [CmdletBinding()] param($Location, $PublisherName, $Offer, $Skus, $Version)
     $global:AnfTestState.ImageReads++
     if ($PublisherName -eq 'MicrosoftWindowsServer') {
-        return [pscustomobject]@{ OSDiskImage = @{ OperatingSystem = 'Windows' }; Version = '1.0.0' }
+        return [pscustomobject]@{ OSDiskImage = @{ OperatingSystem = 'Windows' }; Version = $global:AnfTestState.ImageVersion }
     }
     [pscustomobject]@{
-        OSDiskImage = @{ OperatingSystem = $global:AnfTestState.OracleOS }; Version = '1.0.0'
+        OSDiskImage = @{ OperatingSystem = $global:AnfTestState.OracleOS }; Version = $global:AnfTestState.ImageVersion
         PurchasePlan = @{ Publisher = $PublisherName; Product = $Offer; Name = $Skus }
     }
 }
@@ -753,6 +763,86 @@ Test-Case 'Azure preflight detects cyclic permissions pagination without issuing
     Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'repeated link'
     Assert-Equal $global:AnfTestState.PermissionReads 1
     $global:AnfTestState.PermissionPages = @(@{ value = @(@{ actions = @('*'); notActions = @() }) })
+}
+Test-Case 'ANF deployment resumes after a partial failure without recreating matching resources' {
+    $partial = $twoRegions.Clone()
+    $partial.ResourceGroup = 'anf-partial-west'
+    $partial.SecondResourceGroup = 'anf-partial-north'
+    $global:AnfTestState.FailVolumeName = "$($partial.SecondAnfAccountName)-volume"
+    try {
+        Assert-Throws { & "$root/ANF-PoC-Deployment.ps1" @partial } 'Simulated volume creation failure'
+        $key = 'anf-partial-west/anftestwest/anftestwest-pool/anftestwest-vVolume'
+        $firstVolume = $global:AnfTestState.Volumes[$key]
+        if (-not $firstVolume) { throw 'The test did not reach a partial deployment.' }
+        $writes = $global:AnfTestState.Writes
+        $global:AnfTestState.FailVolumeName = ''
+        & "$root/ANF-PoC-Deployment.ps1" @partial | Out-Null
+        Assert-Equal $global:AnfTestState.Writes ($writes + 2)
+        Assert-Equal ([object]::ReferenceEquals($firstVolume, $global:AnfTestState.Volumes[$key])) $true
+    } finally {
+        $global:AnfTestState.FailVolumeName = ''
+    }
+}
+Test-Case 'Existing ANF network, delegation and export drift is rejected without writes' {
+    $vnet = $global:AnfTestState.Vnets['anf-test-west/anftestwest-vnet']
+    $subnet = $vnet.Subnets[0]
+    $volume = $global:AnfTestState.Volumes['anf-test-west/anftestwest/anftestwest-pool/anftestwest-vVolume']
+    $rule = $volume.ExportPolicy.Rules[0]
+    $writes = $global:AnfTestState.Writes
+    $originalPrefix = $subnet.AddressPrefix
+    $originalDelegations = $subnet.Delegations
+    $originalClients = $rule.AllowedClients
+    try {
+        $subnet.AddressPrefix = '10.1.3.0/24'
+        Assert-Throws { & "$root/ANF-PoC-Deployment.ps1" @twoRegions } 'address prefix differs'
+        $subnet.AddressPrefix = $originalPrefix
+        $subnet.Delegations = @()
+        Assert-Throws { & "$root/ANF-PoC-Deployment.ps1" @twoRegions } 'not delegated'
+        $subnet.Delegations = $originalDelegations
+        $rule.AllowedClients = '0.0.0.0/0'
+        Assert-Throws { & "$root/ANF-PoC-Deployment.ps1" @twoRegions } 'allowed clients differs'
+        Assert-Equal $global:AnfTestState.Writes $writes
+    } finally {
+        $subnet.AddressPrefix = $originalPrefix
+        $subnet.Delegations = $originalDelegations
+        $rule.AllowedClients = $originalClients
+    }
+}
+Test-Case 'Unexpected subscription context aborts before any resource write' {
+    $writes = $global:AnfTestState.Writes
+    $global:AnfTestState.ContextId = '22222222-2222-2222-2222-222222222222'
+    try {
+        Assert-Throws { & "$root/ANF-PoC-Deployment.ps1" @twoRegions } 'context does not match'
+        Assert-Equal $global:AnfTestState.Writes $writes
+    } finally {
+        $global:AnfTestState.ContextId = ''
+    }
+}
+Test-Case 'Incomplete Azure image and WhatIf responses never produce success results' {
+    $writes = $global:AnfTestState.Writes
+    try {
+        $global:AnfTestState.PermissionReads = 0
+        $global:AnfTestState.ImageVersion = ''
+        Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm -CheckOracleImages } 'no resolved version'
+        $global:AnfTestState.ImageVersion = '1.0.0'
+        $global:AnfTestState.PermissionReads = 0
+        $global:AnfTestState.PreviewNull = $true
+        Assert-Throws { & "$root/Test-AzureDeployment.ps1" @arm } 'ARM What-If did not succeed'
+        Assert-Equal $global:AnfTestState.Writes $writes
+    } finally {
+        $global:AnfTestState.ImageVersion = '1.0.0'
+        $global:AnfTestState.PreviewNull = $false
+    }
+}
+Test-Case 'ARM canceled or failed deployment status never produces success' {
+    try {
+        foreach ($state in @('Canceled', 'Failed')) {
+            $global:AnfTestState.DeploymentStatus = $state
+            Assert-Throws { & "$root/ANF with JSON/ANF_JSON_Deployment.ps1" @arm } "ended in state '$state'"
+        }
+    } finally {
+        $global:AnfTestState.DeploymentStatus = 'Succeeded'
+    }
 }
 
 Write-Output "$script:passed passed; $script:failures failed."

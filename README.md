@@ -24,9 +24,10 @@ recovery solution.
   Install-Module Az.Compute, Az.MarketplaceOrdering -Scope CurrentUser
   ```
 
-- Use current supported Az modules. No exact Az release has been certified
-  against a live subscription for these examples. Record the versions used for
-  your environment with `Get-Module Az.* -ListAvailable`.
+- The offline command-contract baseline is **Az 16.5.0**, with exact component
+  versions in [`tests/QualityTools.psd1`](tests/QualityTools.psd1). This checks
+  command metadata, not a live deployment certification. Record the versions
+  used in your deployment environment with `Get-Module Az.* -ListAvailable`.
 - Authenticate explicitly, then pass the intended subscription to each script:
 
   ```powershell
@@ -210,13 +211,53 @@ separately. Existing deployments are not automatically migrated.
 ## Local checks
 
 ```powershell
+# Dependency-free regression suite:
 pwsh -NoProfile -File ./tests/Run-Tests.ps1
+
+# Complete CI-equivalent checks, with explicit one-time tool downloads:
+pwsh -NoProfile -File ./tests/Invoke-QualityChecks.ps1 -InstallTools
+
+# Subsequent runs reuse the tools cache and require no network/Azure login:
+pwsh -NoProfile -File ./tests/Invoke-QualityChecks.ps1
 ```
 
 The dependency-free checks cover PowerShell syntax, input boundaries, status
 timeouts, offline previews, repeat runs, ARM validation handling and Oracle
-orchestration using Azure command doubles. They do not create Azure resources
-and do not replace a live integration test or workload validation.
+orchestration using Azure command doubles. Additional failure cases cover partial
+ANF deployments and resumption, canceled/failed provisioning, subnet/delegation/
+export drift, incorrect subscription contexts and missing image/What-If responses.
+Blank resource states and unresolved image versions now fail explicitly.
+
+The full quality runner adds checks against **real, imported Az module metadata**:
+command and parameter names, required parameters, supported parameter sets,
+literal hashtable splats (including appended keys and helper forwarding) and
+pipeline input. Unknown commands, unresolved splats and unsupported dynamic
+commands fail rather than being silently skipped. Built-in valid and invalid
+fixtures verify the checker itself. No Azure command is invoked by this check.
+It is a conservative static check, not a PowerShell runtime binder: argument
+types/values, actual pipeline object types and Azure responses are not verified.
+
+Tools are downloaded only with `-InstallTools`, from fixed official GitHub release
+assets, and checked against SHA-256 hashes in `tests/QualityTools.psd1`. The Az
+release archive is about 139 MB; only the six needed modules are installed.
+PSScriptAnalyzer is pinned to 1.25.0. Modules are extracted into an isolated cache
+under the OS temporary directory, not the repository or global module locations.
+Use `-ToolsPath '/path/outside/the/repository'` consistently on both commands to
+choose a persistent cache. The installer needs PowerShell 7.4+, `tar` (included
+on the GitHub-hosted runners and modern Windows) and Internet access to GitHub
+releases. It does not silently fall back to another module version or source.
+Treat the local tools cache as trusted executable code; it is not re-downloaded
+or re-hashed on every run. Do not share a writable cache with untrusted users.
+
+Regression tests and contract checks run in fresh `pwsh -NoProfile` processes,
+so Azure command doubles cannot mask real metadata. The parent runner performs
+linting. CI uses the same entry point on Windows and Linux. Exact Az/analyzer
+versions and downloaded bytes are pinned, while OS images and PowerShell patch
+versions remain environment-managed; the runner reports the PowerShell version.
+
+These checks do not create Azure resources and do not replace a live integration
+test or workload validation. The verified offline baseline is not a claim that
+the scripts deploy successfully in Azure.
 
 The ARM template uses stable `Microsoft.NetApp` API `2026-08-01` and
 `Microsoft.Network` API `2026-03-01`, verified in the published
@@ -230,18 +271,21 @@ request, on pushes to `master`, and manually through the Actions tab once the
 workflow is on the default branch. Each run uses both Ubuntu 24.04 and Windows
 Server 2025, with PowerShell 7.4+ supplied by the GitHub-hosted runner.
 
-Both platforms run the offline tests, including JSON parsing and ARM sample
-parameter checks (required values, types, allowed values, size/length constraints,
-CIDRs and capacity). They also analyze deployment scripts with **PSScriptAnalyzer
-1.25.0**. Analyzer warnings or errors fail the check. Test command doubles are
-excluded from linting, but all PowerShell files are parsed by the test suite.
+Both platforms run `tests/Invoke-QualityChecks.ps1 -InstallTools`, including JSON
+parsing and ARM sample parameter checks (required values, types, allowed values,
+size/length constraints,
+CIDRs and capacity), Az 16.5.0 command-contract checks and analysis of deployment
+scripts and quality tooling with **PSScriptAnalyzer 1.25.0**. Analyzer warnings or
+errors fail the check. Only `tests/Run-Tests.ps1`, containing the Azure command
+doubles, is excluded from linting; all PowerShell files are parsed by the test suite.
 
 Checkout is pinned to a commit and the analyzer to an exact version. Runner
 images and their bundled PowerShell patches receive GitHub updates. The workflow
 has read-only repository permissions, does not persist Git credentials, and
-requires no secrets, Azure login or deployments. Only the analyzer installation
-needs access to PowerShell Gallery. GitHub Actions usage is subject to the
-repository's plan and billing settings; no Azure resources or costs are created.
+requires no secrets, Azure login or deployments. Tool installation uses
+checksum-pinned GitHub release downloads, not PowerShell Gallery. GitHub Actions
+usage is subject to the repository's plan and billing settings; no Azure
+resources or costs are created.
 
 Failures appear in the pull request checks and Actions logs. To make passing
 checks mandatory before merging, configure a repository ruleset or branch
