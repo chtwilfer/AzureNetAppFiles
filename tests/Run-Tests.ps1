@@ -142,6 +142,54 @@ Test-Case 'ARM template uses consistent names, service levels, protocols and exp
     $vnet = $template.resources | Where-Object type -EQ 'Microsoft.Network/virtualNetworks'
     Assert-Equal $vnet.properties.subnets.Count 1
 }
+Test-Case 'JSON files parse and ARM sample values satisfy declared parameter constraints' {
+    foreach ($file in Get-ChildItem $root -Recurse -Filter '*.json') {
+        Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json -AsHashtable | Out-Null
+    }
+    $template = Get-Content "$root/ANF with JSON/azuredeploy.json" -Raw | ConvertFrom-Json -AsHashtable
+    $document = Get-Content "$root/ANF with JSON/azuredeploy.parameters.json" -Raw | ConvertFrom-Json -AsHashtable
+    foreach ($name in $template.parameters.Keys) {
+        $definition = $template.parameters[$name]
+        if ($document.parameters.ContainsKey($name)) {
+            if (-not $document.parameters[$name].ContainsKey('value')) {
+                throw "Sample parameter '$name' has no value."
+            }
+            $value = $document.parameters[$name].value
+        } elseif ($definition.ContainsKey('defaultValue')) {
+            # Location's ARM expression is a string; evaluating it requires Azure.
+            $value = $definition.defaultValue
+        } else {
+            throw "Required sample parameter '$name' is missing."
+        }
+        $validType = switch ($definition.type) {
+            'string' { $value -is [string] }
+            'int' { $value -is [int] -or $value -is [long] }
+            'bool' { $value -is [bool] }
+            'array' { $value -is [array] }
+            default { throw "Add a local check for ARM parameter type '$($definition.type)'." }
+        }
+        if (-not $validType) {
+            throw "Sample parameter '$name' does not have type '$($definition.type)'."
+        }
+        if ($definition.ContainsKey('allowedValues') -and $value -cnotin $definition.allowedValues) {
+            throw "Sample parameter '$name' is not an allowed value."
+        }
+        foreach ($bound in @('minValue', 'maxValue', 'minLength', 'maxLength')) {
+            if ($definition.ContainsKey($bound)) {
+                $actual = if ($bound -like '*Length') { $value.Length } else { $value }
+                if (($bound -like 'min*' -and $actual -lt $definition[$bound]) -or
+                    ($bound -like 'max*' -and $actual -gt $definition[$bound])) {
+                    throw "Sample parameter '$name' violates $bound."
+                }
+            }
+        }
+    }
+    Assert-AnfNetwork -Network $document.parameters.netappVirtualNetworkAddressPrefix.value `
+        -Subnet $document.parameters.netappVirtualNetworkSubnetAddressPrefix.value `
+        -AllowedClients $document.parameters.netappAllowedClients.value
+    Assert-AnfCapacity -PoolSizeBytes $document.parameters.netappPoolSize.value `
+        -VolumeSizeBytes $document.parameters.netappVolumeSize.value
+}
 
 # Azure command doubles validate orchestration and repeat runs without accessing a subscription.
 $global:AnfTestState = @{

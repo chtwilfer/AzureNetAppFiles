@@ -139,6 +139,31 @@ The ARM template uses stable `Microsoft.NetApp` API `2026-08-01` and
 [Azure REST API specifications](https://github.com/Azure/azure-rest-api-specs).
 Validate availability in the intended Azure cloud before deploying.
 
+## Automated quality checks
+
+The [Quality checks workflow](.github/workflows/quality.yml) runs on every pull
+request, on pushes to `master`, and manually through the Actions tab once the
+workflow is on the default branch. Each run uses both Ubuntu 24.04 and Windows
+Server 2025, with PowerShell 7.4+ supplied by the GitHub-hosted runner.
+
+Both platforms run the offline tests, including JSON parsing and ARM sample
+parameter checks (required values, types, allowed values, size/length constraints,
+CIDRs and capacity). They also analyze deployment scripts with **PSScriptAnalyzer
+1.25.0**. Analyzer warnings or errors fail the check. Test command doubles are
+excluded from linting, but all PowerShell files are parsed by the test suite.
+
+Checkout is pinned to a commit and the analyzer to an exact version. Runner
+images and their bundled PowerShell patches receive GitHub updates. The workflow
+has read-only repository permissions, does not persist Git credentials, and
+requires no secrets, Azure login or deployments. Only the analyzer installation
+needs access to PowerShell Gallery. GitHub Actions usage is subject to the
+repository's plan and billing settings; no Azure resources or costs are created.
+
+Failures appear in the pull request checks and Actions logs. To make passing
+checks mandatory before merging, configure a repository ruleset or branch
+protection rule separately; this workflow does not change repository rules.
+Local template checks do not replace Azure ARM validation or integration tests.
+
 ## Cost and cleanup
 
 The two-region example allocates two capacity pools; the Oracle example also
