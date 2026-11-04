@@ -291,7 +291,8 @@ function Initialize-AnfVolume {
         [Parameter(Mandatory)] $Environment,
         [string] $Name, [string] $CreationToken, [long] $SizeBytes,
         [string] $ServiceLevel, [ValidateSet('NFSv3', 'NFSv4.1')][string] $Protocol,
-        [string[]] $AllowedClients, [bool] $RootAccess = $false, [int] $TimeoutSeconds = 900
+        [string[]] $AllowedClients, [bool] $RootAccess = $false, [int] $TimeoutSeconds = 900,
+        [switch] $EnableSnapshotDirectory
     )
 
     $arguments = @{
@@ -304,7 +305,9 @@ function Initialize-AnfVolume {
             -Nfsv3:($Protocol -eq 'NFSv3') -Nfsv41:($Protocol -eq 'NFSv4.1') `
             -UnixReadOnly:$false -UnixReadWrite -HasRootAccess:$RootAccess
         $exportPolicy = New-AzNetAppFilesExportPolicyObject -Rule $rule -ErrorAction Stop
-        New-AzNetAppFilesVolume @arguments -Name $Name -Location $Environment.Location -UsageThreshold $SizeBytes `
+        $volumeOptions = @{}
+        if ($EnableSnapshotDirectory) { $volumeOptions.SnapshotDirectoryVisible = $true }
+        New-AzNetAppFilesVolume @arguments @volumeOptions -Name $Name -Location $Environment.Location -UsageThreshold $SizeBytes `
             -SubnetId $Environment.SubnetId -CreationToken $CreationToken -ServiceLevel $ServiceLevel `
             -ProtocolType $Protocol -ExportPolicy $exportPolicy | Out-Null
     }
@@ -329,6 +332,9 @@ function Initialize-AnfVolume {
     Assert-AnfValue "$Name NFSv4.1 export" $rules[0].Nfsv41 ($Protocol -eq 'NFSv4.1')
     Assert-AnfValue "$Name read/write export" $rules[0].UnixReadWrite $true
     Assert-AnfValue "$Name read-only export" $rules[0].UnixReadOnly $false
+    if ($EnableSnapshotDirectory -and -not $volume.SnapshotDirectoryVisible) {
+        throw "Volume '$Name' must expose its snapshot directory for the file-restore demo."
+    }
     $volume
 }
 

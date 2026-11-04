@@ -28,6 +28,10 @@ $pwsh = Join-Path $PSHOME $(if ($IsWindows) { 'pwsh.exe' } else { 'pwsh' })
 if ($LASTEXITCODE -ne 0) { throw 'Offline regression tests failed.' }
 & $pwsh -NoLogo -NoProfile -File "$PSScriptRoot/Test-AzCommandContracts.ps1" -ToolsPath $ToolsPath
 if ($LASTEXITCODE -ne 0) { throw 'Azure command contract checks failed.' }
+if (-not $IsWindows) {
+    & sh "$PSScriptRoot/Test-DemoClient.sh"
+    if ($LASTEXITCODE -ne 0) { throw 'Linux demo client checks failed.' }
+}
 Import-Module $analyzerManifest -ErrorAction Stop
 if ((Get-Module PSScriptAnalyzer).Version.ToString() -ne $tools.Analyzer.Version) {
     throw 'The loaded PSScriptAnalyzer version does not match QualityTools.psd1.'

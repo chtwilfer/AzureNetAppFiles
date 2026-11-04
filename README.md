@@ -1,11 +1,43 @@
 # Azure NetApp Files PowerShell examples
 
-PowerShell and ARM examples for Azure NetApp Files (ANF). These are **paid
-proof-of-concept deployments**, not a production-ready database or disaster
-recovery solution.
+PowerShell and ARM examples for short Azure NetApp Files (ANF) customer demos.
+These are **paid, disposable demo deployments**, not a production platform,
+database or disaster recovery solution.
+
+## Start here: one-region customer demo
+
+The recommended path now includes a private Ubuntu NFS client operated through
+**Azure Run Command**, with no inbound SSH, VPN or Bastion requirement:
+
+**Deploy -> mount/write/read -> snapshot -> change file -> restore file -> cleanup**
+
+Follow the [customer demo walkthrough](demo/README.md) for prerequisites, costs,
+portal talking points, troubleshooting and deletion safeguards. Edit the
+[sample configuration](demo/demo.parameters.psd1), authenticate explicitly and
+run from the repository root:
+
+```powershell
+$demo = Import-PowerShellDataFile ./demo/demo.parameters.psd1
+./Invoke-AnfDemo.ps1 @demo -Action Deploy -WhatIf
+./Invoke-AnfDemo.ps1 @demo -Action Deploy
+./Invoke-AnfDemo.ps1 @demo -Action Prepare
+./Invoke-AnfDemo.ps1 @demo -Action Snapshot
+./Invoke-AnfDemo.ps1 @demo -Action Change
+./Invoke-AnfDemo.ps1 @demo -Action Restore
+./Invoke-AnfDemo.ps1 @demo -Action Cleanup
+```
+
+Deploy and Prepare belong **before** the meeting. Cleanup deletes all demo data
+and asks for confirmation after ownership and inventory checks. This path uses
+one 4 TiB ANF pool, a VM, NAT gateway and outbound public IP, all billable.
+Expiry tags are reminders, not automated cleanup. Live Azure verification is
+still outstanding.
+
+## Available scenarios
 
 | Entry point | Resources |
 |---|---|
+| [`Invoke-AnfDemo.ps1`](demo/README.md) **recommended** | One region, ANF volume, private Linux client, NFS read/write, snapshot file recovery and guarded cleanup |
 | [`ANF-PoC-Deployment.ps1`](ANF-PoC-Deployment.ps1) | Two independent regions, each with a resource group, delegated VNet/subnet, ANF account, pool and NFS volume; optional snapshots |
 | [`ANF with JSON`](ANF%20with%20JSON/Readme.md) | One ANF environment using an ARM JSON template |
 | [`Oracle on Azure`](Oracle%20on%20Azure/Readme.md) | Windows application VM, Linux Oracle VM, two ANF volumes and VNet peerings |
@@ -24,6 +56,8 @@ recovery solution.
   Install-Module Az.Compute, Az.MarketplaceOrdering -Scope CurrentUser
   ```
 
+- The recommended single-region demo additionally needs `Az.Compute`, but not
+  `Az.MarketplaceOrdering`; see its [setup instructions](demo/README.md).
 - The offline command-contract baseline is **Az 16.5.0**, with exact component
   versions in [`tests/QualityTools.psd1`](tests/QualityTools.psd1). This checks
   command metadata, not a live deployment certification. Record the versions
@@ -39,8 +73,8 @@ recovery solution.
 - Resource creation requires suitable permissions on the target subscription or
   resource groups. Resource-group creation needs subscription-level permissions.
   Provider registration needs the relevant registration permissions.
-- `Microsoft.NetApp` and `Microsoft.Network` must be registered; the Oracle
-  scenario also requires `Microsoft.Compute`. Registration is performed only
+- `Microsoft.NetApp` and `Microsoft.Network` must be registered; scenarios with
+  client/Oracle VMs also require `Microsoft.Compute`. Registration is performed only
   when `-RegisterProviders` is explicitly supplied. It has a bounded wait.
 - Check ANF region availability, subscription quota, capacity, image availability
   and network connectivity before deployment. Network arguments use canonical
@@ -94,11 +128,14 @@ implemented**; the two volumes remain independent.
 - The ARM entry point additionally offers `-Preview` for an Azure ARM What-If
   against an **existing resource group**. Providers must already be registered.
   Preview does not create the group or register providers.
-- Direct ANF deployments reuse matching accounts, pools, VNets, volumes and
+- The existing infrastructure scripts reuse matching accounts, pools, VNets, volumes and
   snapshots. Managed configuration differences stop execution rather than
   silently replacing resources or widening access. Existing VNets must already
   contain the expected subnet and delegation. Other unmanaged settings are not
   reconciled. Use dedicated PoC resources.
+- The recommended single-region demo instead requires a new resource group on
+  Deploy. Use its Prepare/Snapshot/Change/Restore steps afterwards; after a
+  partial deployment, inspect and clean up before deploying again.
 - The ARM template owns its VNet and inline subnet. Incremental mode does **not**
   mean that unrelated subnets/settings on that VNet will be preserved. Do not
   point this template at a shared VNet; review `-Preview` before redeploying.
@@ -198,8 +235,10 @@ Azure login and target subscription/resource group.
 
 NFS clients must be supplied explicitly; `0.0.0.0/0` is rejected by the
 PowerShell entry points. Client networks also need real connectivity; an export
-rule alone does not establish routing or peering. Root access is disabled unless
+rule alone does not establish routing or peering. The infrastructure-only examples disable root access unless
 `-AllowRootAccess` (or ARM `netappAllowRootAccess`) is explicitly enabled.
+The recommended demo deliberately enables root access only for its private
+client's `/32` export because Run Command executes as root.
 Root squashing and filesystem permissions must be considered when mounting and
 initializing workloads.
 
@@ -227,6 +266,11 @@ orchestration using Azure command doubles. Additional failure cases cover partia
 ANF deployments and resumption, canceled/failed provisioning, subnet/delegation/
 export drift, incorrect subscription contexts and missing image/What-If responses.
 Blank resource states and unresolved image versions now fail explicitly.
+Demo orchestration checks include private client/NAT configuration, ownership
+and inventory guards, snapshot sequencing and guest-error propagation. On
+non-Windows systems the shared runner also exercises the Linux guest script
+using local mount/agent fixtures and real temporary example files. This is not
+a real NFS mount or Azure integration test.
 
 The full quality runner adds checks against **real, imported Az module metadata**:
 command and parameter names, required parameters, supported parameter sets,

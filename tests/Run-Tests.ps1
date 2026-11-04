@@ -5,6 +5,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 . "$root/scripts/Deployment.Common.ps1"
+. "$root/scripts/Demo.Common.ps1"
 $script:failures = 0
 $script:passed = 0
 
@@ -208,6 +209,8 @@ $global:AnfTestState = @{
     PermissionReads = 0; PermissionHttpStatus = 200
     PreviewStatus = 'Succeeded'; PreviewError = $null; PreviewCalls = 0; ValidationCalls = 0; ImageReads = 0
     FailVolumeName = ''; PreviewNull = $false; ImageVersion = '1.0.0'; DeploymentStatus = 'Succeeded'; ContextId = ''
+    Inventory = @(); DeletedGroups = @(); ClientMode = 'Success'; ClientCalls = @(); Nat = $null; PublicIp = $null
+    CleanupDeleteResult = $true
 }
 function Get-Module { param($Name, [switch] $ListAvailable) [pscustomobject]@{ Name = $Name } }
 function Import-Module { [CmdletBinding()] param($Name) $global:AnfTestState.Imports++ }
@@ -272,18 +275,21 @@ function Invoke-AzRestMethod {
     }
 }
 function New-AzResourceGroup {
-    [CmdletBinding()] param($Name, $Location)
+    [CmdletBinding()] param($Name, $Location, $Tag)
     $global:AnfTestState.Writes++
-    $global:AnfTestState.Groups[$Name] = [pscustomobject]@{ ResourceGroupName = $Name; Location = $Location }
+    $global:AnfTestState.Groups[$Name] = [pscustomobject]@{ ResourceGroupName = $Name; Location = $Location; Tags = $Tag }
     $global:AnfTestState.Groups[$Name]
 }
 function New-AzDelegation { [CmdletBinding()] param($Name, $ServiceName) [pscustomobject]@{ ServiceName = $ServiceName } }
 function New-AzVirtualNetworkSubnetConfig {
-    [CmdletBinding()] param($Name, $AddressPrefix, $Delegation)
-    [pscustomobject]@{ Name = $Name; AddressPrefix = $AddressPrefix; Delegations = @($Delegation); Id = "/subnets/$Name" }
+    [CmdletBinding()] param($Name, $AddressPrefix, $Delegation, $NetworkSecurityGroup, $InputObject, $DefaultOutboundAccess)
+    [pscustomobject]@{
+        Name = $Name; AddressPrefix = $AddressPrefix; Delegations = @($Delegation); Id = "/subnets/$Name"
+        NetworkSecurityGroup = $NetworkSecurityGroup; NatGateway = $InputObject; DefaultOutboundAccess = $DefaultOutboundAccess
+    }
 }
 function New-AzVirtualNetwork {
-    [CmdletBinding()] param($ResourceGroupName, $Location, $Name, $AddressPrefix, $Subnet)
+    [CmdletBinding()] param($ResourceGroupName, $Location, $Name, $AddressPrefix, $Subnet, $Tag)
     if (-not $Subnet) { throw 'Subnet must be created before the VNet.' }
     $global:AnfTestState.Writes++
     $global:AnfTestState.Vnets["$ResourceGroupName/$Name"] = [pscustomobject]@{
@@ -336,7 +342,7 @@ function New-AzNetAppFilesExportPolicyObject { [CmdletBinding()] param($Rule) [p
 function New-AzNetAppFilesVolume {
     [CmdletBinding()]
     param($ResourceGroupName, $AccountName, $PoolName, $Name, $Location, $UsageThreshold, $SubnetId,
-        $CreationToken, $ServiceLevel, $ProtocolType, $ExportPolicy)
+        $CreationToken, $ServiceLevel, $ProtocolType, $ExportPolicy, [switch] $SnapshotDirectoryVisible)
     if ($Name -eq $global:AnfTestState.FailVolumeName) { throw 'Simulated volume creation failure' }
     $global:AnfTestState.Writes++
     $global:AnfTestState.Volumes["$ResourceGroupName/$AccountName/$PoolName/$Name"] = [pscustomobject]@{
@@ -344,6 +350,8 @@ function New-AzNetAppFilesVolume {
         SubnetId = $SubnetId; CreationToken = $CreationToken; ServiceLevel = $ServiceLevel
         ProtocolTypes = @($ProtocolType); ExportPolicy = $ExportPolicy; FileSystemId = 'test-filesystem'
         ProvisioningState = 'Succeeded'; VolumeType = 'Regular'
+        SnapshotDirectoryVisible = $SnapshotDirectoryVisible.IsPresent
+        MountTargets = @([pscustomobject]@{ IpAddress = '10.42.2.4' })
     }
 }
 function Get-AzNetAppFilesVolume {
@@ -421,16 +429,19 @@ function Get-AzNetworkSecurityGroup {
     }
 }
 function New-AzNetworkSecurityGroup {
-    [CmdletBinding()] param($ResourceGroupName, $Location, $Name)
+    [CmdletBinding()] param($ResourceGroupName, $Location, $Name, $SecurityRules, $Tag)
     $global:AnfTestState.Writes++
-    $nsg = [pscustomobject]@{ Name = $Name; Id = "/nsgs/$Name" }
+    $nsg = [pscustomobject]@{ Name = $Name; Id = "/nsgs/$Name"; SecurityRules = @($SecurityRules) }
     $global:AnfTestState.Nsgs["$ResourceGroupName/$Name"] = $nsg
     $nsg
 }
 function New-AzNetworkInterface {
-    [CmdletBinding()] param($Name, $ResourceGroupName, $Location, $SubnetId, $NetworkSecurityGroupId)
+    [CmdletBinding()] param($Name, $ResourceGroupName, $Location, $SubnetId, $NetworkSecurityGroupId, $PrivateIpAddress, $Tag)
     $global:AnfTestState.Writes++
-    $nic = [pscustomobject]@{ Name = $Name; Id = "/nics/$Name"; PublicIpAddress = $null }
+    $nic = [pscustomobject]@{
+        Name = $Name; Id = "/nics/$Name"; PublicIpAddress = $null; PrivateIpAddress = $PrivateIpAddress
+        NetworkSecurityGroupId = $NetworkSecurityGroupId
+    }
     $global:AnfTestState.Nics["$ResourceGroupName/$Name"] = $nic
     $nic
 }
@@ -465,7 +476,7 @@ function Add-AzVMNetworkInterface {
     process { $VM.NicId = $Id; $VM }
 }
 function New-AzVM {
-    [CmdletBinding()] param($ResourceGroupName, $Location, $VM)
+    [CmdletBinding()] param($ResourceGroupName, $Location, $VM, $Tag)
     $global:AnfTestState.Writes++
     $global:AnfTestState.Vms["$ResourceGroupName/$($VM.Name)"] = [pscustomobject] $VM
 }
@@ -475,6 +486,63 @@ function Add-AzVirtualNetworkPeering {
     $VirtualNetwork.VirtualNetworkPeerings += [pscustomobject]@{
         Name = $Name; RemoteVirtualNetwork = @{ Id = $RemoteVirtualNetworkId }; PeeringState = 'Connected'
     }
+}
+function New-AzPublicIpAddress {
+    [CmdletBinding()] param($Name, $ResourceGroupName, $Location, $AllocationMethod, $Sku, $Tag)
+    Assert-Equal $AllocationMethod Static
+    Assert-Equal $Sku Standard
+    $global:AnfTestState.Writes++
+    $global:AnfTestState.PublicIp = [pscustomobject]@{ Name = $Name; Id = "/publicIps/$Name" }
+    $global:AnfTestState.PublicIp
+}
+function New-AzNatGateway {
+    [CmdletBinding()] param($Name, $ResourceGroupName, $Location, $Sku, $PublicIpAddress, $Tag)
+    if (-not $PublicIpAddress.Id) { throw 'Explicit outbound public IP is required.' }
+    $global:AnfTestState.Writes++
+    $global:AnfTestState.Nat = [pscustomobject]@{ Name = $Name; Id = "/nat/$Name"; PublicIpAddress = $PublicIpAddress }
+    $global:AnfTestState.Nat
+}
+function New-AzNetworkSecurityRuleConfig {
+    [CmdletBinding()] param($Name, $Description, $Access, $Protocol, $Direction, $Priority,
+        $SourceAddressPrefix, $SourcePortRange, $DestinationAddressPrefix, $DestinationPortRange)
+    [pscustomobject]@{ Name = $Name; Access = $Access; Direction = $Direction; Priority = $Priority }
+}
+function Set-AzVMOSDisk {
+    param([Parameter(ValueFromPipeline)] $VM, $Name, $CreateOption, $StorageAccountType, $DeleteOption)
+    process {
+        $VM.DiskName = $Name
+        $VM.DiskType = $StorageAccountType
+        $VM
+    }
+}
+function Get-AzResource {
+    [CmdletBinding()] param($ResourceGroupName)
+    $global:AnfTestState.Inventory
+}
+function Remove-AzResourceGroup {
+    [CmdletBinding()] param($Name, [switch] $Force)
+    Assert-Equal $Force.IsPresent $true
+    if (-not $global:AnfTestState.CleanupDeleteResult) { return $false }
+    $global:AnfTestState.DeletedGroups += $Name
+    $global:AnfTestState.Groups.Remove($Name)
+    $true
+}
+function Invoke-AzVMRunCommand {
+    [CmdletBinding()] param($ResourceGroupName, $VMName, $CommandId, $ScriptString)
+    Assert-Equal $VMName demo-client
+    Assert-Equal $CommandId RunShellScript
+    if ($ScriptString -match '__[A-Z_]+__') { throw 'Unresolved shell template placeholder.' }
+    if ($ScriptString.Contains("`r")) { throw 'Linux guest scripts must use LF line endings.' }
+    $global:AnfTestState.ClientCalls += $ScriptString
+    $code = 'ComponentStatus/StdOut/succeeded'
+    $message = [regex]::Match($ScriptString, 'ANF_DEMO_OK:[A-Za-z]+:[0-9a-f]{32}').Value
+    switch ($global:AnfTestState.ClientMode) {
+        MissingMarker { $message = 'Script exited without its completion marker' }
+        Failed { $code = 'ComponentStatus/StdErr/failed' }
+        Empty { return }
+        Transport { throw 'Run Command transport error' }
+    }
+    [pscustomobject]@{ Value = @([pscustomobject]@{ Code = $code; Message = $message }) }
 }
 
 Test-Case 'WhatIf never imports modules or registers providers even when explicitly requested' {
@@ -843,6 +911,142 @@ Test-Case 'ARM canceled or failed deployment status never produces success' {
     } finally {
         $global:AnfTestState.DeploymentStatus = 'Succeeded'
     }
+}
+
+$demo = @{ SubscriptionId = $twoRegions.SubscriptionId; DemoId = 'customer01'; Location = 'westeurope' }
+$demoGroup = 'anfdemo-customer01'
+$demoVolumeKey = "$demoGroup/anf-customer01/anf-customer01-pool/demo-volume"
+Test-Case 'All demo WhatIf actions are offline, including destructive cleanup' {
+    $imports = $global:AnfTestState.Imports
+    $writes = $global:AnfTestState.Writes
+    $calls = $global:AnfTestState.ClientCalls.Count
+    foreach ($action in @('Deploy', 'Prepare', 'Snapshot', 'Change', 'Restore', 'Cleanup')) {
+        & "$root/Invoke-AnfDemo.ps1" @demo -Action $action -WhatIf
+    }
+    Assert-Equal $global:AnfTestState.Imports $imports
+    Assert-Equal $global:AnfTestState.Writes $writes
+    Assert-Equal $global:AnfTestState.ClientCalls.Count $calls
+    Assert-Throws { & "$root/Invoke-AnfDemo.ps1" -SubscriptionId $demo.SubscriptionId -DemoId "bad';id" -WhatIf } 'pattern'
+}
+Test-Case 'Demo deployment creates one isolated ANF volume and Run Command-only client with explicit outbound access' {
+    $result = & "$root/Invoke-AnfDemo.ps1" @demo
+    Assert-Equal $result.ResourceGroup $demoGroup
+    Assert-Equal $result.NextStep Prepare
+    $tags = $global:AnfTestState.Groups[$demoGroup].Tags
+    Assert-Equal $tags.anfDemo single-region-v1
+    Assert-Equal $tags.demoId customer01
+    if ([datetime]::Parse($tags.expiresOn).ToUniversalTime() -le [datetime]::UtcNow) { throw 'Expiry must be in the future.' }
+    $volume = $global:AnfTestState.Volumes[$demoVolumeKey]
+    Assert-Equal $volume.ExportPolicy.Rules[0].AllowedClients '10.42.1.4/32'
+    Assert-Equal $volume.ExportPolicy.Rules[0].HasRootAccess $true
+    Assert-Equal $volume.SnapshotDirectoryVisible $true
+    $nic = $global:AnfTestState.Nics["$demoGroup/demo-client-nic"]
+    Assert-Equal $nic.PrivateIpAddress '10.42.1.4'
+    Assert-Equal $nic.PublicIpAddress $null
+    $client = $global:AnfTestState.Vms["$demoGroup/demo-client"]
+    Assert-Equal $client.OS Linux
+    Assert-Equal $client.PasswordDisabled $true
+    Assert-Equal $client.DiskName demo-client-os
+    Assert-Equal $client.DiskType StandardSSD_LRS
+    Assert-Equal $client.Image 'Canonical/ubuntu-24_04-lts/server/1.0.0'
+    if ($client.SshKey -notmatch '^ssh-rsa ') { throw 'Missing generated SSH public key.' }
+    $subnet = $global:AnfTestState.Vnets["$demoGroup/anf-customer01-vnet"].Subnets | Where-Object Name -EQ client
+    Assert-Equal $subnet.NatGateway.Name demo-nat
+    Assert-Equal $subnet.DefaultOutboundAccess $false
+    Assert-Equal $subnet.NetworkSecurityGroup.SecurityRules[0].Access Deny
+    Assert-Equal $subnet.NetworkSecurityGroup.SecurityRules[0].Direction Inbound
+    Assert-Equal (@($global:AnfTestState.Snapshots.Keys | Where-Object { $_ -like "$demoGroup/*" }).Count) 0
+}
+Test-Case 'Demo deployment never adopts an existing resource group or changes its ownership tags' {
+    $writes = $global:AnfTestState.Writes
+    Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo } 'already exists'
+    Assert-Equal $global:AnfTestState.Writes $writes
+}
+Test-Case 'Demo prepares, snapshots populated data, changes and restores only the example file' {
+    & "$root/Invoke-AnfDemo.ps1" @demo -Action Prepare | Out-Null
+    Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Change } 'before Change or Restore'
+    & "$root/Invoke-AnfDemo.ps1" @demo -Action Snapshot | Out-Null
+    Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Snapshot } 'already exists'
+    & "$root/Invoke-AnfDemo.ps1" @demo -Action Change | Out-Null
+    & "$root/Invoke-AnfDemo.ps1" @demo -Action Restore | Out-Null
+    $calls = $global:AnfTestState.ClientCalls
+    Assert-Equal ($calls[-4] -match "action='Prepare'") $true
+    Assert-Equal ($calls[-3] -match "action='Check'") $true
+    Assert-Equal ($calls[-2] -match "action='Change'") $true
+    Assert-Equal ($calls[-1] -match "action='Restore'") $true
+}
+Test-Case 'Run Command failures and missing guest completion markers stop the demo explicitly' {
+    try {
+        foreach ($mode in @('MissingMarker', 'Failed', 'Empty')) {
+            $global:AnfTestState.ClientMode = $mode
+            Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Prepare } 'did not complete successfully'
+        }
+        $global:AnfTestState.ClientMode = 'Transport'
+        Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Prepare } 'transport error'
+    } finally { $global:AnfTestState.ClientMode = 'Success' }
+}
+Test-Case 'Demo refuses invalid mount targets, hidden snapshots and failed baseline snapshots' {
+    $volume = $global:AnfTestState.Volumes[$demoVolumeKey]
+    $snapshot = $global:AnfTestState.Snapshots["$demoVolumeKey/demo-baseline"]
+    $calls = $global:AnfTestState.ClientCalls.Count
+    try {
+        $volume.MountTargets[0].IpAddress = "10.0.0.1'; touch /tmp/bad"
+        Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Prepare } 'valid IPv4 mount target'
+        $volume.MountTargets[0].IpAddress = '10.42.2.4'
+        $volume.SnapshotDirectoryVisible = $false
+        Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Prepare } 'expose its snapshot directory'
+        $volume.SnapshotDirectoryVisible = $true
+        $snapshot.ProvisioningState = 'Failed'
+        Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Restore } 'before Change or Restore'
+        Assert-Equal $global:AnfTestState.ClientCalls.Count $calls
+    } finally {
+        $volume.MountTargets[0].IpAddress = '10.42.2.4'
+        $volume.SnapshotDirectoryVisible = $true
+        $snapshot.ProvisioningState = 'Succeeded'
+    }
+}
+Test-Case 'Demo cleanup refuses unowned groups, unexpected resources and wrong subscription contexts' {
+    $group = $global:AnfTestState.Groups[$demoGroup]
+    $tags = $group.Tags
+    try {
+        $group.Tags = @{}
+        Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Cleanup -Confirm:$false } 'not owned by this demo'
+        $group.Tags = $tags
+        $global:AnfTestState.Inventory = @([pscustomobject]@{
+            Name = 'customer-data'; ResourceType = 'Microsoft.Storage/storageAccounts'
+            ResourceId = "/subscriptions/$($demo.SubscriptionId)/resourceGroups/$demoGroup/providers/Microsoft.Storage/storageAccounts/customer-data"
+        })
+        Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Cleanup -Confirm:$false } 'Unexpected resource'
+        $global:AnfTestState.Inventory = @()
+        $global:AnfTestState.ContextId = '22222222-2222-2222-2222-222222222222'
+        Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Cleanup -Confirm:$false } 'context does not match'
+        Assert-Equal $global:AnfTestState.DeletedGroups.Count 0
+    } finally {
+        $group.Tags = $tags
+        $global:AnfTestState.Inventory = @()
+        $global:AnfTestState.ContextId = ''
+    }
+}
+Test-Case 'Demo cleanup accepts only exact owned resource IDs, including child resources, and deletes only its group' {
+    $prefix = "/subscriptions/$($demo.SubscriptionId)/resourceGroups/$demoGroup/providers"
+    $global:AnfTestState.Inventory = @(
+        [pscustomobject]@{ Name = 'demo-client'; ResourceType = 'Microsoft.Compute/virtualMachines'; ResourceId = "$prefix/Microsoft.Compute/virtualMachines/demo-client" },
+        [pscustomobject]@{ Name = 'demo-baseline'; ResourceType = 'Microsoft.NetApp/netAppAccounts/capacityPools/volumes/snapshots'; ResourceId = "$prefix/Microsoft.NetApp/netAppAccounts/anf-customer01/capacityPools/anf-customer01-pool/volumes/demo-volume/snapshots/demo-baseline" },
+        [pscustomobject]@{ Name = 'RunCommandLinux'; ResourceType = 'Microsoft.Compute/virtualMachines/extensions'; ResourceId = "$prefix/Microsoft.Compute/virtualMachines/demo-client/extensions/RunCommandLinux" }
+    )
+    $global:AnfTestState.Inventory[0].ResourceId += '-foreign'
+    Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Cleanup -Confirm:$false } 'Unexpected resource'
+    $global:AnfTestState.Inventory[0].ResourceId = "$prefix/Microsoft.Compute/virtualMachines/demo-client"
+    try {
+        $global:AnfTestState.CleanupDeleteResult = $false
+        Assert-Throws { & "$root/Invoke-AnfDemo.ps1" @demo -Action Cleanup -Confirm:$false } 'not confirmed complete'
+        Assert-Equal $global:AnfTestState.Groups.ContainsKey($demoGroup) $true
+    } finally { $global:AnfTestState.CleanupDeleteResult = $true }
+    & "$root/Invoke-AnfDemo.ps1" @demo -Action Cleanup -Confirm:$false | Out-Null
+    Assert-Equal $global:AnfTestState.DeletedGroups.Count 1
+    Assert-Equal $global:AnfTestState.DeletedGroups[0] $demoGroup
+    Assert-Equal $global:AnfTestState.Groups.ContainsKey($arm.ResourceGroup) $true
+    $global:AnfTestState.Inventory = @()
 }
 
 Write-Output "$script:passed passed; $script:failures failed."
