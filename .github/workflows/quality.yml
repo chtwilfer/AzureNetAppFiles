@@ -18,7 +18,7 @@ jobs:
   quality:
     name: Quality (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -29,8 +29,8 @@ jobs:
       run:
         shell: pwsh
     env:
-      PSSCRIPTANALYZER_VERSION: '1.25.0'
       POWERSHELL_TELEMETRY_OPTOUT: '1'
+      AZUREPS_DATA_COLLECTION: 'false'
 
     steps:
       - name: Check out repository
@@ -46,29 +46,5 @@ jobs:
           }
           $PSVersionTable
 
-      - name: Run offline tests and JSON/template checks
-        run: ./tests/Run-Tests.ps1
-
-      - name: Install pinned PSScriptAnalyzer
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Install-Module -Name PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION `
-              -Repository PSGallery -Scope CurrentUser -Force -ErrorAction Stop
-
-      - name: Analyze deployment scripts
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Import-Module PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION -ErrorAction Stop
-          $scripts = @(Get-ChildItem -Path . -Recurse -Filter '*.ps1' | Where-Object {
-              $relativePath = [System.IO.Path]::GetRelativePath((Get-Location).Path, $_.FullName)
-              $relativePath -notmatch '^tests[\\/]'
-          })
-          if ($scripts.Count -eq 0) {
-              throw 'No deployment scripts were found for analysis.'
-          }
-          $issues = @($scripts | Invoke-ScriptAnalyzer -Severity Error,Warning -ErrorAction Stop)
-          if ($issues.Count -gt 0) {
-              $issues | Format-Table ScriptName, Line, RuleName, Message -AutoSize -Wrap
-              throw "PSScriptAnalyzer reported $($issues.Count) warning(s) or error(s)."
-          }
-          Write-Output "PSScriptAnalyzer ${env:PSSCRIPTANALYZER_VERSION}: $($scripts.Count) deployment scripts passed."
+      - name: Run reproducible offline quality checks
+        run: ./tests/Invoke-QualityChecks.ps1 -InstallTools

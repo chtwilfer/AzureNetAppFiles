@@ -123,6 +123,9 @@ function Get-AnfVmImage {
     if (-not $image -or $image.OSDiskImage.OperatingSystem -ne $OperatingSystem) {
         throw "Image '$Publisher/$Offer/$Sku/$Version' must exist in the region and use $OperatingSystem."
     }
+    if ([string]::IsNullOrWhiteSpace($image.Version)) {
+        throw "Image '$Publisher/$Offer/$Sku/$Version' returned no resolved version."
+    }
     $plan = $image.PurchasePlan
     if ($plan) {
         $terms = Get-AzMarketplaceTerms -Publisher $plan.Publisher -Product $plan.Product -Name $plan.Name -ErrorAction Stop
@@ -145,7 +148,8 @@ function Wait-AnfState {
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     do {
         $resource = & $Read
-        if ($null -eq $resource -or -not $resource.PSObject.Properties[$Property]) {
+        if ($null -eq $resource -or -not $resource.PSObject.Properties[$Property] -or
+            [string]::IsNullOrWhiteSpace([string] $resource.$Property)) {
             throw "Resource status '$Property' was not returned."
         }
         $state = [string] $resource.$Property
